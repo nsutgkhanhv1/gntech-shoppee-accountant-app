@@ -1,56 +1,89 @@
 @import 'tailwindcss';
 
 @theme {
-  --font-sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --font-mono: ui-monospace, Consolas, monospace;
+  --font-sans: 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Consolas, monospace;
+}
+
+/* Semantic color tokens mapped to CSS variables so they swap with .dark */
+@theme inline {
+  --color-primary: var(--c-primary);
+  --color-secondary: var(--c-secondary);
+  --color-muted: var(--c-muted);
+  --color-canvas: var(--c-canvas);
+  --color-surface: var(--c-surface);
+  --color-hover: var(--c-hover);
+  --color-border: var(--c-border);
+  --color-border-strong: var(--c-border-strong);
+  --color-accent: var(--c-accent);
+  --color-accent-hover: var(--c-accent-hover);
+  --color-accent-soft: var(--c-accent-soft);
+  --color-accent-ring: var(--c-accent-ring);
+  --color-accent-disabled: var(--c-accent-disabled);
+  --color-danger: var(--c-danger);
+  --color-danger-bg: var(--c-danger-bg);
+  --color-danger-border: var(--c-danger-border);
+  --color-disabled: var(--c-disabled);
+  --color-code-bg: var(--c-code-bg);
+  --color-code-text: var(--c-code-text);
 }
 
 @layer base {
+  /* Light (X.com light theme) */
   :root {
-    --text: #6b6375;
-    --text-h: #08060d;
-    --bg: #fff;
-    --border: #e5e4e7;
-    --code-bg: #f4f3ec;
-    --accent: #aa3bff;
-    --accent-bg: rgba(170, 59, 255, 0.1);
-    --accent-border: rgba(170, 59, 255, 0.5);
-    --social-bg: rgba(244, 243, 236, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.1) 0 10px 15px -3px,
-      rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+    --c-primary: #0f1419;
+    --c-secondary: #536471;
+    --c-muted: #536471;
+    --c-canvas: #f7f9f9;
+    --c-surface: #ffffff;
+    --c-hover: #eff3f4;
+    --c-border: #eff3f4;
+    --c-border-strong: #cfd9de;
+    --c-accent: #1d9bf0;
+    --c-accent-hover: #1a8cd8;
+    --c-accent-soft: rgba(29, 155, 240, 0.1);
+    --c-accent-ring: rgba(29, 155, 240, 0.4);
+    --c-accent-disabled: #9ecbf6;
+    --c-danger: #f4212e;
+    --c-danger-bg: rgba(244, 33, 46, 0.1);
+    --c-danger-border: rgba(244, 33, 46, 0.4);
+    --c-disabled: #eff3f4;
+    --c-code-bg: #0f1419;
+    --c-code-text: #e7e9ea;
 
-    color-scheme: light dark;
-    color: var(--text);
-    background: var(--bg);
-    font: 18px/145% var(--font-sans);
+    color-scheme: light;
+    color: var(--c-primary);
+    background: var(--c-canvas);
+    font: 15px/145% var(--font-sans);
     font-synthesis: none;
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
 
-  @media (max-width: 1024px) {
-    :root {
-      font-size: 16px;
-    }
-  }
+  /* Dark (X.com dark theme: pure black) */
+  .dark {
+    --c-primary: #e7e9ea;
+    --c-secondary: #71767b;
+    --c-muted: #71767b;
+    --c-canvas: #000000;
+    --c-surface: #000000;
+    --c-hover: #16181c;
+    --c-border: #2f3336;
+    --c-border-strong: #3a4045;
+    --c-accent: #1d9bf0;
+    --c-accent-hover: #1a8cd8;
+    --c-accent-soft: rgba(29, 155, 240, 0.1);
+    --c-accent-ring: rgba(29, 155, 240, 0.4);
+    --c-accent-disabled: #1a3a4d;
+    --c-danger: #f4212e;
+    --c-danger-bg: rgba(244, 33, 46, 0.1);
+    --c-danger-border: rgba(244, 33, 46, 0.4);
+    --c-disabled: #16181c;
+    --c-code-bg: #0f1419;
+    --c-code-text: #e7e9ea;
 
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --text: #9ca3af;
-      --text-h: #f3f4f6;
-      --bg: #16171d;
-      --border: #2e303a;
-      --code-bg: #1f2028;
-      --accent: #c084fc;
-      --accent-bg: rgba(192, 132, 252, 0.15);
-      --accent-border: rgba(192, 132, 252, 0.5);
-      --social-bg: rgba(47, 48, 58, 0.5);
-      --shadow:
-        rgba(0, 0, 0, 0.4) 0 10px 15px -3px,
-        rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-    }
+    color-scheme: dark;
   }
 
   body {
@@ -58,7 +91,27 @@
   }
 
   button,
-  a {
+  a,
+  input,
+  select,
+  textarea {
     font: inherit;
+  }
+
+  /* Slim, X-style scrollbars */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--c-border-strong) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--c-border-strong);
+    border-radius: 9999px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
   }
 }

@@ -1,5 +1,11 @@
-import { useMemo, useRef, useState } from "react";
-import type { ColumnDef, DateRange, OrderRow, ShopeeConfig } from "./shopeeApi";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type {
+  ColumnDef,
+  DateMode,
+  DateRange,
+  OrderRow,
+  ShopeeConfig,
+} from "./shopeeApi";
 import { fetchOrdersWithEscrow } from "./shopeeApi";
 
 type Page = "orders" | "columns" | "excel";
@@ -9,12 +15,15 @@ const STORAGE_KEYS = {
   visibleColumns: "gntech.orders.visibleColumns",
   visibleExcelOrderColumns: "gntech.excel.orderColumns",
   visibleExcelSkuColumns: "gntech.excel.skuColumns",
+  dateMode: "gntech.orders.dateMode",
+  theme: "gntech.theme",
 };
 
 const fallbackColumns: ColumnDef[] = [
   { key: "order_sn", label: "Mã đơn" },
   { key: "order_status", label: "Trạng thái" },
   { key: "create_time", label: "Ngày tạo", type: "date" },
+  { key: "completion_time", label: "Ngày hoàn thành", type: "date" },
   { key: "buyer_username", label: "Người mua" },
   { key: "total_amount", label: "Tổng đơn", type: "currency", align: "right" },
   { key: "escrow_amount", label: "Escrow", type: "currency", align: "right" },
@@ -35,7 +44,7 @@ const fallbackColumns: ColumnDef[] = [
 const defaultVisibleColumns = fallbackColumns.map((column) => column.key);
 
 const defaultConfig: ShopeeConfig = {
-  apiBaseUrl: "https://venuscharm-worker.999.vn",
+  apiBaseUrl: "https://shopee-worker.gntech.vn",
   shopId: "18230319",
 };
 
@@ -55,14 +64,24 @@ function loadJson<T>(key: string, fallback: T): T {
     return {
       ...fallback,
       ...parsed,
-      apiBaseUrl:
-        typeof parsed.apiBaseUrl === "string"
-          ? parsed.apiBaseUrl
-          : defaultConfig.apiBaseUrl,
+      apiBaseUrl: defaultConfig.apiBaseUrl,
     } as T;
   } catch {
     return fallback;
   }
+}
+
+function loadString(key: string, fallback: string): string {
+  try {
+    const value = localStorage.getItem(key);
+    return value ? value : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function parseDateMode(value: string): DateMode {
+  return value === "paid" || value === "completed" ? value : "created";
 }
 
 function loadVisibleColumns() {
@@ -177,16 +196,46 @@ function App() {
     from: todayInputValue(-13),
     to: todayInputValue(),
   });
+  const [dateMode, setDateMode] = useState<DateMode>(() =>
+    parseDateMode(loadString(STORAGE_KEYS.dateMode, "created")),
+  );
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    const saved = loadString(STORAGE_KEYS.theme, "");
+    if (saved === "light" || saved === "dark") return saved;
+    return window.matchMedia?.("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light";
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle("dark", theme === "dark");
+    try {
+      localStorage.setItem(STORAGE_KEYS.theme, theme);
+    } catch {
+      // ignore
+    }
+  }, [theme]);
   const [rows, setRows] = useState<OrderRow[]>([]);
   const [columns, setColumns] = useState<ColumnDef[]>(fallbackColumns);
   const [visibleColumns, setVisibleColumns] =
     useState<string[]>(loadVisibleColumns);
   const [visibleExcelOrderColumns, setVisibleExcelOrderColumns] = useState<
     string[]
-  >(() => loadStringList(STORAGE_KEYS.visibleExcelOrderColumns, defaultExcelOrderColumns));
+  >(() =>
+    ensureExcelColumns(
+      loadStringList(STORAGE_KEYS.visibleExcelOrderColumns, defaultExcelOrderColumns),
+      requiredOrderStatusExcelColumns,
+    ),
+  );
   const [visibleExcelSkuColumns, setVisibleExcelSkuColumns] = useState<
     string[]
-  >(() => loadStringList(STORAGE_KEYS.visibleExcelSkuColumns, defaultExcelSkuColumns));
+  >(() =>
+    ensureExcelColumns(
+      loadStringList(STORAGE_KEYS.visibleExcelSkuColumns, defaultExcelSkuColumns),
+      requiredOrderStatusExcelColumns,
+    ),
+  );
   const [selectedRow, setSelectedRow] = useState<OrderRow | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
@@ -247,6 +296,15 @@ function App() {
     );
   }
 
+  function updateDateMode(nextMode: DateMode) {
+    setDateMode(nextMode);
+    try {
+      localStorage.setItem(STORAGE_KEYS.dateMode, nextMode);
+    } catch {
+      // ignore storage errors
+    }
+  }
+
   async function loadOrders() {
     setError("");
 
@@ -257,12 +315,19 @@ function App() {
 
     setIsLoading(true);
     try {
-      const result = await fetchOrdersWithEscrow(config, range);
+      const result = await fetchOrdersWithEscrow(config, range, dateMode);
       setRows(result.rows);
       setColumns(result.columns.length > 0 ? result.columns : fallbackColumns);
       setVisibleColumns((current) => {
         const validKeys = new Set(result.columns.map((column) => column.key));
+        // Giữ các cột user đã chọn (vẫn còn hợp lệ trong API),
+        // đồng thời tự thêm các cột mặc định (vd: completion_time) mà chưa hiển thị.
         const next = current.filter((key) => validKeys.has(key));
+        for (const key of defaultVisibleColumns) {
+          if (validKeys.has(key) && !next.includes(key)) {
+            next.push(key);
+          }
+        }
         return next.length > 0 ? next : defaultVisibleColumns;
       });
       setSelectedRow(null);
@@ -291,14 +356,14 @@ function App() {
   }
 
   return (
-    <main className="min-h-svh bg-[#f6f7f9] text-[#172033]">
+    <main className="min-h-svh bg-canvas text-primary">
       <div className="mx-auto flex min-h-svh max-w-[1440px]">
-        <aside className="hidden w-64 border-r border-[#d9dee7] bg-white px-4 py-5 lg:block">
+        <aside className="hidden w-64 border-r border-border bg-surface px-4 py-5 lg:block">
           <div className="mb-8">
-            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#7d8797]">
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted">
               GNTech
             </p>
-            <h1 className="mt-1 text-xl font-semibold text-[#172033]">
+            <h1 className="mt-1 text-xl font-semibold text-primary">
               Shopee Accountant
             </h1>
           </div>
@@ -322,16 +387,19 @@ function App() {
               Cấu hình Excel
             </NavButton>
           </nav>
+          <div className="mt-8">
+            <ThemeToggleButton theme={theme} onToggle={setTheme} />
+          </div>
         </aside>
 
         <section className="flex min-w-0 flex-1 flex-col">
-          <header className="border-b border-[#d9dee7] bg-white px-4 py-4 sm:px-6">
+          <header className="border-b border-border bg-surface px-4 py-4 sm:px-6">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <p className="text-sm text-[#667085]">
+                <p className="text-sm text-muted">
                   Order detail + payment escrow detail qua backend worker
                 </p>
-                <h2 className="text-2xl font-semibold text-[#172033]">
+                <h2 className="text-2xl font-semibold text-primary">
                   {page === "orders"
                     ? "Đối soát đơn hàng"
                     : page === "columns"
@@ -339,7 +407,9 @@ function App() {
                       : "Cấu hình Excel"}
                 </h2>
               </div>
-              <div className="grid grid-cols-3 gap-2 lg:hidden">
+              <div className="flex items-center gap-2">
+                <ThemeToggleButton theme={theme} onToggle={setTheme} compact />
+                <div className="grid grid-cols-3 gap-2 lg:hidden">
                 <NavButton
                   active={page === "orders"}
                   onClick={() => setPage("orders")}
@@ -359,6 +429,7 @@ function App() {
                   Excel
                 </NavButton>
               </div>
+              </div>
             </div>
           </header>
 
@@ -366,9 +437,11 @@ function App() {
             <OrdersPage
               activeColumns={activeColumns}
               config={config}
+              dateMode={dateMode}
               error={error}
               isLoading={isLoading}
               onConfigChange={updateConfig}
+              onDateModeChange={updateDateMode}
               onExportOrders={exportOrders}
               onLoadOrders={loadOrders}
               onRangeChange={setRange}
@@ -405,6 +478,44 @@ function numberValue(value: unknown) {
   return typeof value === "number" ? value : 0;
 }
 
+function ThemeToggleButton({
+  theme,
+  onToggle,
+  compact = false,
+}: {
+  theme: "light" | "dark";
+  onToggle: (theme: "light" | "dark") => void;
+  compact?: boolean;
+}) {
+  const isDark = theme === "dark";
+  return (
+    <button
+      type="button"
+      aria-label={isDark ? "Chuyển sang giao diện sáng" : "Chuyển sang giao diện tối"}
+      title={isDark ? "Giao diện sáng" : "Giao diện tối"}
+      onClick={() => onToggle(isDark ? "light" : "dark")}
+      className={
+        compact
+          ? "inline-flex h-9 w-9 items-center justify-center rounded-full border border-border-strong text-secondary transition-colors hover:bg-hover"
+          : "inline-flex w-full items-center gap-3 rounded-full px-3 py-2.5 text-left text-sm font-medium text-secondary transition-colors hover:bg-hover"
+      }
+    >
+      <span className="inline-flex h-5 w-5 items-center justify-center">
+        {isDark ? (
+          <svg viewBox="0 0 24 24" className="h-5 w-5 fill-current" aria-hidden>
+            <path d="M12 18a6 6 0 1 1 0-12 6 6 0 0 1 0 12Zm0-14a1 1 0 0 1 1 1v1a1 1 0 1 1-2 0V5a1 1 0 0 1 1-1Zm0 14a1 1 0 0 1 1 1v1a1 1 0 1 1-2 0v-1a1 1 0 0 1 1-1ZM4.9 4.9a1 1 0 0 1 1.4 0l.7.7A1 1 0 1 1 5.6 7l-.7-.7a1 1 0 0 1 0-1.4Zm12 12a1 1 0 0 1 1.4 0l.7.7a1 1 0 0 1-1.4 1.4l-.7-.7a1 1 0 0 1 0-1.4ZM2 12a1 1 0 0 1 1-1h1a1 1 0 1 1 0 2H3a1 1 0 0 1-1-1Zm14 0a1 1 0 0 1 1-1h1a1 1 0 1 1 0 2h-1a1 1 0 0 1-1-1ZM4.9 19.1a1 1 0 0 1 0-1.4l.7-.7A1 1 0 1 1 7 18.4l-.7.7a1 1 0 0 1-1.4 0Zm12-12a1 1 0 0 1 0-1.4l.7-.7A1 1 0 0 1 19 5.6l-.7.7a1 1 0 0 1-1.4 0Z" />
+          </svg>
+        ) : (
+          <svg viewBox="0 0 24 24" className="h-5 w-5 fill-current" aria-hidden>
+            <path d="M21.64 13a1 1 0 0 0-1.05-.78 8.5 8.5 0 0 1-9.8-9.8A1 1 0 0 0 10 1.36 10.5 10.5 0 1 0 22.64 14a1 1 0 0 0-1-1Z" />
+          </svg>
+        )}
+      </span>
+      {!compact && <span>{isDark ? "Giao diện sáng" : "Giao diện tối"}</span>}
+    </button>
+  );
+}
+
 function NavButton({
   active,
   children,
@@ -419,8 +530,8 @@ function NavButton({
       type="button"
       className={`w-full rounded-md px-3 py-2 text-left text-sm font-medium transition-colors ${
         active
-          ? "bg-[#e9f1ff] text-[#155eef]"
-          : "text-[#465468] hover:bg-[#f0f3f7]"
+          ? "bg-accent-soft text-accent"
+          : "text-secondary hover:bg-hover"
       }`}
       onClick={onClick}
     >
@@ -432,9 +543,11 @@ function NavButton({
 function OrdersPage({
   activeColumns,
   config,
+  dateMode,
   error,
   isLoading,
   onConfigChange,
+  onDateModeChange,
   onExportOrders,
   onLoadOrders,
   onRangeChange,
@@ -445,9 +558,11 @@ function OrdersPage({
 }: {
   activeColumns: ColumnDef[];
   config: ShopeeConfig;
+  dateMode: DateMode;
   error: string;
   isLoading: boolean;
   onConfigChange: (config: ShopeeConfig) => void;
+  onDateModeChange: (mode: DateMode) => void;
   onExportOrders: () => void;
   onLoadOrders: () => void;
   onRangeChange: (range: DateRange) => void;
@@ -458,25 +573,24 @@ function OrdersPage({
 }) {
   return (
     <div className="flex-1 space-y-5 overflow-auto p-4 sm:p-6">
-      <section className="rounded-lg border border-[#d9dee7] bg-white p-4">
-        <div className="grid gap-3 lg:grid-cols-[2fr_1fr]">
-          <TextInput
-            label="Backend API URL"
-            value={config.apiBaseUrl}
-            onChange={(value) =>
-              onConfigChange({ ...config, apiBaseUrl: value })
-            }
-          />
+      <section className="rounded-lg border border-border bg-surface p-4">
+        <div className="grid gap-3 lg:max-w-sm">
           <TextInput
             label="Shop ID"
             value={config.shopId}
-            onChange={(value) => onConfigChange({ ...config, shopId: value })}
+            onChange={(value) =>
+              onConfigChange({
+                ...config,
+                apiBaseUrl: defaultConfig.apiBaseUrl,
+                shopId: value,
+              })
+            }
           />
         </div>
       </section>
 
-      <section className="rounded-lg border border-[#d9dee7] bg-white p-4">
-        <div className="grid gap-3 lg:grid-cols-[minmax(0,520px)_auto_auto] lg:items-end">
+      <section className="rounded-lg border border-border bg-surface p-4">
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,520px)_auto_auto_auto] lg:items-end">
           <div className="space-y-3">
             <DateInput
               label="Ngày bắt đầu"
@@ -489,9 +603,23 @@ function OrdersPage({
               onChange={(value) => onRangeChange({ ...range, to: value })}
             />
           </div>
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="font-medium text-secondary">Chế độ ngày</span>
+            <select
+              className="h-10 rounded-md border border-border-strong bg-surface px-3 text-sm text-primary focus:border-accent focus:outline-none"
+              value={dateMode}
+              onChange={(event) =>
+                onDateModeChange(parseDateMode(event.target.value))
+              }
+            >
+              <option value="created">Ngày đặt hàng</option>
+              <option value="paid">Ngày hoàn thành thanh toán (Ngày Shopee trả tiền cho shop bán hàng)</option>
+              <option value="completed">Ngày hoàn thành</option>
+            </select>
+          </label>
           <button
             type="button"
-            className="h-10 rounded-md bg-[#155eef] px-4 text-sm font-semibold text-white transition-colors hover:bg-[#004eeb] disabled:cursor-not-allowed disabled:bg-[#9db7f9]"
+            className="h-10 rounded-full bg-accent px-5 text-sm font-bold text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-accent-disabled"
             disabled={isLoading}
             onClick={onLoadOrders}
           >
@@ -499,18 +627,15 @@ function OrdersPage({
           </button>
           <button
             type="button"
-            className="h-10 rounded-md border border-[#c8d0dc] bg-white px-4 text-sm font-semibold text-[#344054] transition-colors hover:bg-[#f6f7f9] disabled:cursor-not-allowed disabled:bg-[#f2f4f7] disabled:text-[#98a2b3]"
+            className="h-10 rounded-md border border-border-strong bg-surface px-4 text-sm font-semibold text-secondary transition-colors hover:bg-canvas disabled:cursor-not-allowed disabled:bg-disabled disabled:text-muted"
             disabled={isLoading || rows.length === 0}
             onClick={onExportOrders}
           >
             Export XLSX
           </button>
         </div>
-        <p className="mt-2 text-sm text-[#667085]">
-          Có thể chọn khoảng dài hơn 14 ngày, hệ thống sẽ tự chia nhỏ khi gọi Shopee.
-        </p>
         {error ? (
-          <div className="mt-3 rounded-md border border-[#f5b8b8] bg-[#fff1f1] px-3 py-2 text-sm text-[#b42318]">
+          <div className="mt-3 rounded-md border border-danger-border bg-danger-bg px-3 py-2 text-sm text-danger">
             {error}
           </div>
         ) : null}
@@ -554,19 +679,19 @@ function ColumnsPage({
 
   return (
     <div className="flex-1 overflow-auto p-4 sm:p-6">
-      <section className="max-w-5xl rounded-lg border border-[#d9dee7] bg-white p-4">
+      <section className="max-w-5xl rounded-lg border border-border bg-surface p-4">
         <div className="mb-4 flex items-center justify-between gap-3">
           <div>
-            <h3 className="text-lg font-semibold text-[#172033]">
+            <h3 className="text-lg font-semibold text-primary">
               Cột trong bảng đơn hàng
             </h3>
-            <p className="text-sm text-[#667085]">
+            <p className="text-sm text-muted">
               Tick những field cần xem trong data table.
             </p>
           </div>
           <button
             type="button"
-            className="rounded-md border border-[#c8d0dc] px-3 py-2 text-sm font-medium text-[#344054] hover:bg-[#f6f7f9]"
+            className="rounded-md border border-border-strong px-3 py-2 text-sm font-medium text-secondary hover:bg-canvas"
             onClick={() => onVisibleColumnsChange(defaultVisibleColumns)}
           >
             Mặc định
@@ -577,19 +702,19 @@ function ColumnsPage({
           {columns.map((column) => (
             <label
               key={column.key}
-              className="flex cursor-pointer items-center justify-between rounded-md border border-[#e4e7ec] px-3 py-2 hover:bg-[#f8fafc]"
+              className="flex cursor-pointer items-center justify-between rounded-md border border-code-text px-3 py-2 hover:bg-hover"
             >
               <span className="min-w-0 pr-3">
-                <span className="block truncate text-sm font-medium text-[#172033]">
+                <span className="block truncate text-sm font-medium text-primary">
                   {column.label}
                 </span>
-                <span className="block truncate font-mono text-xs text-[#667085]">
+                <span className="block truncate font-mono text-xs text-muted">
                   {column.key}
                 </span>
               </span>
               <input
                 type="checkbox"
-                className="h-4 w-4 shrink-0 accent-[#155eef]"
+                className="h-4 w-4 shrink-0 accent-accent"
                 checked={visibleSet.has(column.key)}
                 onChange={() => toggleColumn(column.key)}
               />
@@ -661,23 +786,23 @@ function ExcelColumnPicker({
   }
 
   return (
-    <section className="rounded-lg border border-[#d9dee7] bg-white p-4">
+    <section className="rounded-lg border border-border bg-surface p-4">
       <div className="mb-4 flex items-center justify-between gap-3">
         <div>
-          <h3 className="text-lg font-semibold text-[#172033]">{title}</h3>
-          <p className="text-sm text-[#667085]">{description}</p>
+          <h3 className="text-lg font-semibold text-primary">{title}</h3>
+          <p className="text-sm text-muted">{description}</p>
         </div>
         <div className="flex gap-2">
           <button
             type="button"
-            className="rounded-md border border-[#c8d0dc] px-3 py-2 text-sm font-medium text-[#344054] hover:bg-[#f6f7f9]"
+            className="rounded-md border border-border-strong px-3 py-2 text-sm font-medium text-secondary hover:bg-canvas"
             onClick={() => onSelectedColumnsChange(excelColumns.map((column) => column.key))}
           >
             Chọn tất cả
           </button>
           <button
             type="button"
-            className="rounded-md border border-[#c8d0dc] px-3 py-2 text-sm font-medium text-[#344054] hover:bg-[#f6f7f9]"
+            className="rounded-md border border-border-strong px-3 py-2 text-sm font-medium text-secondary hover:bg-canvas"
             onClick={() => onSelectedColumnsChange(defaultColumns)}
           >
             Mặc định
@@ -689,19 +814,19 @@ function ExcelColumnPicker({
         {excelColumns.map((column) => (
           <label
             key={column.key}
-            className="flex cursor-pointer items-center justify-between rounded-md border border-[#e4e7ec] px-3 py-2 hover:bg-[#f8fafc]"
+            className="flex cursor-pointer items-center justify-between rounded-md border border-code-text px-3 py-2 hover:bg-hover"
           >
             <span className="min-w-0 pr-3">
-              <span className="block truncate text-sm font-medium text-[#172033]">
+              <span className="block truncate text-sm font-medium text-primary">
                 {column.label}
               </span>
-              <span className="block truncate font-mono text-xs text-[#667085]">
+              <span className="block truncate font-mono text-xs text-muted">
                 {column.key}
               </span>
             </span>
             <input
               type="checkbox"
-              className="h-4 w-4 shrink-0 accent-[#155eef]"
+              className="h-4 w-4 shrink-0 accent-accent"
               checked={selectedSet.has(column.key)}
               onChange={() => toggleColumn(column.key)}
             />
@@ -723,11 +848,11 @@ function TextInput({
 }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-[#667085]">
+      <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted">
         {label}
       </span>
       <input
-        className="h-10 w-full rounded-md border border-[#c8d0dc] bg-white px-3 text-sm text-[#172033] outline-none focus:border-[#155eef] focus:ring-2 focus:ring-[#d1e0ff]"
+        className="h-10 w-full rounded-md border border-border-strong bg-surface px-3 text-sm text-primary outline-none focus:border-accent focus:ring-2 focus:ring-accent-ring"
         type="text"
         value={value}
         onChange={(event) => onChange(event.target.value)}
@@ -780,7 +905,7 @@ function DateInput({
 
   return (
     <div>
-      <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-[#667085]">
+      <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted">
         {label}
       </span>
       <div className="relative grid grid-cols-[72px_72px_96px_40px] gap-2">
@@ -821,7 +946,7 @@ function DateInput({
         <button
           type="button"
           aria-label={`Chọn ${label.toLowerCase()} từ lịch`}
-          className="flex h-10 w-10 items-center justify-center rounded-md border border-[#c8d0dc] bg-white text-[#465468] transition-colors hover:bg-[#f6f7f9] focus:border-[#155eef] focus:outline-none focus:ring-2 focus:ring-[#d1e0ff]"
+          className="flex h-10 w-10 items-center justify-center rounded-md border border-border-strong bg-surface text-secondary transition-colors hover:bg-canvas focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-ring"
           onClick={openDatePicker}
         >
           <CalendarIcon />
@@ -861,7 +986,7 @@ function DatePartInput({
       <span className="sr-only">{label}</span>
       <input
         aria-label={label}
-        className="h-10 w-full rounded-md border border-[#c8d0dc] bg-white px-3 text-center text-sm text-[#172033] outline-none focus:border-[#155eef] focus:ring-2 focus:ring-[#d1e0ff]"
+        className="h-10 w-full rounded-md border border-border-strong bg-surface px-3 text-center text-sm text-primary outline-none focus:border-accent focus:ring-2 focus:ring-accent-ring"
         inputMode="numeric"
         maxLength={maxLength}
         placeholder={label}
@@ -917,9 +1042,9 @@ function numericInput(value: string, maxLength: number) {
 
 function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border border-[#d9dee7] bg-white p-4">
-      <p className="text-sm text-[#667085]">{label}</p>
-      <p className="mt-1 truncate text-xl font-semibold text-[#172033]">
+    <div className="rounded-lg border border-border bg-surface p-4">
+      <p className="text-sm text-muted">{label}</p>
+      <p className="mt-1 truncate text-xl font-semibold text-primary">
         {value}
       </p>
     </div>
@@ -936,26 +1061,26 @@ function DataTable({
   rows: OrderRow[];
 }) {
   return (
-    <section className="overflow-hidden rounded-lg border border-[#d9dee7] bg-white">
-      <div className="flex items-center justify-between border-b border-[#d9dee7] px-4 py-3">
-        <h3 className="text-base font-semibold text-[#172033]">Data table</h3>
-        <span className="text-sm text-[#667085]">{rows.length} đơn</span>
+    <section className="overflow-hidden rounded-lg border border-border bg-surface">
+      <div className="flex items-center justify-between border-b border-border px-4 py-3">
+        <h3 className="text-base font-semibold text-primary">Data table</h3>
+        <span className="text-sm text-muted">{rows.length} đơn</span>
       </div>
       <div className="overflow-auto">
         <table className="min-w-full border-separate border-spacing-0 text-left text-sm">
-          <thead className="sticky top-0 bg-[#f8fafc]">
+          <thead className="sticky top-0 bg-hover">
             <tr>
               {columns.map((column) => (
                 <th
                   key={column.key}
-                  className={`whitespace-nowrap border-b border-[#d9dee7] px-4 py-3 font-semibold text-[#465468] ${
+                  className={`whitespace-nowrap border-b border-border px-4 py-3 font-semibold text-secondary ${
                     column.align === "right" ? "text-right" : "text-left"
                   }`}
                 >
                   {column.label}
                 </th>
               ))}
-              <th className="border-b border-[#d9dee7] px-4 py-3 text-right font-semibold text-[#465468]">
+              <th className="border-b border-border px-4 py-3 text-right font-semibold text-secondary">
                 Chi tiết
               </th>
             </tr>
@@ -964,7 +1089,7 @@ function DataTable({
             {rows.length === 0 ? (
               <tr>
                 <td
-                  className="px-4 py-12 text-center text-[#667085]"
+                  className="px-4 py-12 text-center text-muted"
                   colSpan={columns.length + 1}
                 >
                   Chưa có dữ liệu. Nhập Backend API URL, Shop ID và chọn khoảng
@@ -973,11 +1098,11 @@ function DataTable({
               </tr>
             ) : (
               rows.map((row) => (
-                <tr key={row.order_sn} className="hover:bg-[#f8fafc]">
+                <tr key={row.order_sn} className="hover:bg-hover">
                   {columns.map((column) => (
                     <td
                       key={column.key}
-                      className={`max-w-[280px] truncate whitespace-nowrap border-b border-[#eef1f5] px-4 py-3 text-[#172033] ${
+                      className={`max-w-[280px] truncate whitespace-nowrap border-b border-border px-4 py-3 text-primary ${
                         column.align === "right" ? "text-right font-medium" : ""
                       }`}
                       title={String(row.values[column.key] ?? "")}
@@ -985,10 +1110,10 @@ function DataTable({
                       {formatCell(row, column)}
                     </td>
                   ))}
-                  <td className="whitespace-nowrap border-b border-[#eef1f5] px-4 py-3 text-right">
+                  <td className="whitespace-nowrap border-b border-border px-4 py-3 text-right">
                     <button
                       type="button"
-                      className="rounded-md border border-[#c8d0dc] px-3 py-1.5 text-sm font-medium text-[#344054] hover:bg-[#f0f3f7]"
+                      className="rounded-md border border-border-strong px-3 py-1.5 text-sm font-medium text-secondary hover:bg-hover"
                       onClick={() => onSelectRow(row)}
                     >
                       Xem JSON
@@ -1007,17 +1132,17 @@ function DataTable({
 function OrderDetail({ onClose, row }: { onClose: () => void; row: OrderRow }) {
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/30">
-      <aside className="h-full w-full max-w-5xl overflow-auto bg-white shadow-2xl">
-        <div className="sticky top-0 flex items-center justify-between border-b border-[#d9dee7] bg-white px-5 py-4">
+      <aside className="h-full w-full max-w-5xl overflow-auto bg-surface shadow-2xl">
+        <div className="sticky top-0 flex items-center justify-between border-b border-border bg-surface px-5 py-4">
           <div>
-            <p className="text-sm text-[#667085]">Chi tiết đơn và escrow</p>
-            <h3 className="text-lg font-semibold text-[#172033]">
+            <p className="text-sm text-muted">Chi tiết đơn và escrow</p>
+            <h3 className="text-lg font-semibold text-primary">
               {row.order_sn}
             </h3>
           </div>
           <button
             type="button"
-            className="rounded-md border border-[#c8d0dc] px-3 py-2 text-sm font-medium text-[#344054] hover:bg-[#f0f3f7]"
+            className="rounded-md border border-border-strong px-3 py-2 text-sm font-medium text-secondary hover:bg-hover"
             onClick={onClose}
           >
             Đóng
@@ -1037,37 +1162,37 @@ function OrderItemsTable({ row }: { row: OrderRow }) {
   const items = asArray(row.raw_order.item_list).map(asRecord);
 
   return (
-    <section className="overflow-hidden rounded-lg border border-[#d9dee7]">
-      <div className="flex items-center justify-between border-b border-[#d9dee7] bg-[#f8fafc] px-4 py-3">
-        <h4 className="text-sm font-semibold text-[#344054]">Sản phẩm trong đơn</h4>
-        <span className="text-sm text-[#667085]">{items.length} dòng</span>
+    <section className="overflow-hidden rounded-lg border border-border">
+      <div className="flex items-center justify-between border-b border-border bg-hover px-4 py-3">
+        <h4 className="text-sm font-semibold text-secondary">Sản phẩm trong đơn</h4>
+        <span className="text-sm text-muted">{items.length} dòng</span>
       </div>
       <div className="overflow-auto">
         <table className="min-w-full border-separate border-spacing-0 text-left text-sm">
-          <thead className="bg-white">
+          <thead className="bg-surface">
             <tr>
-              <th className="whitespace-nowrap border-b border-[#d9dee7] px-4 py-3 font-semibold text-[#465468]">
+              <th className="whitespace-nowrap border-b border-border px-4 py-3 font-semibold text-secondary">
                 Sản phẩm
               </th>
-              <th className="whitespace-nowrap border-b border-[#d9dee7] px-4 py-3 font-semibold text-[#465468]">
+              <th className="whitespace-nowrap border-b border-border px-4 py-3 font-semibold text-secondary">
                 SKU
               </th>
-              <th className="whitespace-nowrap border-b border-[#d9dee7] px-4 py-3 font-semibold text-[#465468]">
+              <th className="whitespace-nowrap border-b border-border px-4 py-3 font-semibold text-secondary">
                 Phân loại
               </th>
-              <th className="whitespace-nowrap border-b border-[#d9dee7] px-4 py-3 font-semibold text-[#465468]">
+              <th className="whitespace-nowrap border-b border-border px-4 py-3 font-semibold text-secondary">
                 SKU phân loại
               </th>
-              <th className="whitespace-nowrap border-b border-[#d9dee7] px-4 py-3 text-right font-semibold text-[#465468]">
+              <th className="whitespace-nowrap border-b border-border px-4 py-3 text-right font-semibold text-secondary">
                 SL
               </th>
-              <th className="whitespace-nowrap border-b border-[#d9dee7] px-4 py-3 text-right font-semibold text-[#465468]">
+              <th className="whitespace-nowrap border-b border-border px-4 py-3 text-right font-semibold text-secondary">
                 Giá gốc
               </th>
-              <th className="whitespace-nowrap border-b border-[#d9dee7] px-4 py-3 text-right font-semibold text-[#465468]">
+              <th className="whitespace-nowrap border-b border-border px-4 py-3 text-right font-semibold text-secondary">
                 Giá bán
               </th>
-              <th className="whitespace-nowrap border-b border-[#d9dee7] px-4 py-3 text-right font-semibold text-[#465468]">
+              <th className="whitespace-nowrap border-b border-border px-4 py-3 text-right font-semibold text-secondary">
                 Tạm tính
               </th>
             </tr>
@@ -1075,7 +1200,7 @@ function OrderItemsTable({ row }: { row: OrderRow }) {
           <tbody>
             {items.length === 0 ? (
               <tr>
-                <td className="px-4 py-8 text-center text-[#667085]" colSpan={8}>
+                <td className="px-4 py-8 text-center text-muted" colSpan={8}>
                   Không có item_list trong order detail.
                 </td>
               </tr>
@@ -1092,28 +1217,28 @@ function OrderItemsTable({ row }: { row: OrderRow }) {
 
                 return (
                   <tr key={`${asString(item.item_id) || index}-${asString(item.model_id) || ""}`}>
-                    <td className="max-w-[360px] border-b border-[#eef1f5] px-4 py-3 text-[#172033]">
+                    <td className="max-w-[360px] border-b border-border px-4 py-3 text-primary">
                       <div className="line-clamp-2">{asString(item.item_name) || "-"}</div>
                     </td>
-                    <td className="whitespace-nowrap border-b border-[#eef1f5] px-4 py-3 text-[#172033]">
+                    <td className="whitespace-nowrap border-b border-border px-4 py-3 text-primary">
                       {asString(item.item_sku) || "-"}
                     </td>
-                    <td className="max-w-[220px] truncate whitespace-nowrap border-b border-[#eef1f5] px-4 py-3 text-[#172033]">
+                    <td className="max-w-[220px] truncate whitespace-nowrap border-b border-border px-4 py-3 text-primary">
                       {asString(item.model_name) || "-"}
                     </td>
-                    <td className="whitespace-nowrap border-b border-[#eef1f5] px-4 py-3 text-[#172033]">
+                    <td className="whitespace-nowrap border-b border-border px-4 py-3 text-primary">
                       {asString(item.model_sku) || "-"}
                     </td>
-                    <td className="whitespace-nowrap border-b border-[#eef1f5] px-4 py-3 text-right font-medium text-[#172033]">
+                    <td className="whitespace-nowrap border-b border-border px-4 py-3 text-right font-medium text-primary">
                       {quantity || "-"}
                     </td>
-                    <td className="whitespace-nowrap border-b border-[#eef1f5] px-4 py-3 text-right text-[#172033]">
+                    <td className="whitespace-nowrap border-b border-border px-4 py-3 text-right text-primary">
                       {formatCurrency(originalPrice, row.currency)}
                     </td>
-                    <td className="whitespace-nowrap border-b border-[#eef1f5] px-4 py-3 text-right text-[#172033]">
+                    <td className="whitespace-nowrap border-b border-border px-4 py-3 text-right text-primary">
                       {formatCurrency(sellingPrice, row.currency)}
                     </td>
-                    <td className="whitespace-nowrap border-b border-[#eef1f5] px-4 py-3 text-right font-medium text-[#172033]">
+                    <td className="whitespace-nowrap border-b border-border px-4 py-3 text-right font-medium text-primary">
                       {formatCurrency(lineTotal, row.currency)}
                     </td>
                   </tr>
@@ -1148,7 +1273,14 @@ function asString(value: unknown) {
 }
 
 function asNumber(value: unknown) {
-  return typeof value === "number" ? value : undefined;
+  if (typeof value === "number") {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : undefined;
+  }
+  return undefined;
 }
 
 type ExportCell = string | number | boolean | null | undefined;
@@ -1157,34 +1289,52 @@ type RevenueExportRow = {
   values: Record<string, ExportCell>;
 };
 
+const orderStatusLabels: Record<string, string> = {
+  UNPAID: "Chưa thanh toán",
+  PENDING: "Chờ xác nhận",
+  READY_TO_SHIP: "Sẵn sàng giao hàng",
+  PROCESSED: "Đã xử lý",
+  SHIPPED: "Đang giao hàng",
+  COMPLETED: "Hoàn thành",
+  IN_CANCEL: "Đang hủy",
+  CANCELLED: "Đã hủy",
+};
+
 const excelColumns = [
   { key: "transaction_id", label: "Mã giao dịch" },
   { key: "row_type", label: "Đơn hàng / Sản phẩm" },
   { key: "order_sn", label: "Mã đơn hàng" },
+  { key: "order_status", label: "Mã trạng thái đơn" },
+  { key: "order_status_label", label: "Trạng thái đơn" },
   { key: "order_type", label: "Loại đơn hàng" },
   { key: "return_request_sn", label: "Mã yêu cầu hoàn tiền" },
-  { key: "tax_registration_code", label: "Mã Số Thuế" },
+  { key: "return_sn", label: "Mã yêu cầu hoàn/trả" },
+  { key: "return_status", label: "Trạng thái hoàn/trả" },
+  { key: "return_reason", label: "Lý do hoàn/trả" },
   { key: "item_id", label: "Mã sản phẩm" },
   { key: "item_name", label: "Tên sản phẩm" },
   { key: "model_name", label: "Phân loại" },
   { key: "item_sku", label: "SKU" },
   { key: "model_sku", label: "SKU Phân loại" },
   { key: "quantity", label: "Số lượng" },
-  { key: "product_price", label: "Đơn giá gốc" },
-  { key: "discounted_product_price", label: "Đơn giá sau giảm" },
-  { key: "shopee_product_subsidy", label: "Sản phẩm được trợ giá từ Shopee" },
+  { key: "returned_quantity", label: "Số lượng hoàn/trả" },
   { key: "is_bestseller", label: "Sản Phẩm Bán Chạy" },
   { key: "create_time", label: "Ngày đặt hàng" },
-  { key: "pay_time", label: "Ngày hoàn thành thanh toán" },
+  { key: "update_time", label: "Ngày cập nhật trạng thái" },
+  { key: "completion_time", label: "Ngày nhận/hoàn thành" },
+  { key: "pay_time", label: "Ngày hoàn thành thanh toán (Ngày Shopee trả tiền cho shop bán hàng)" },
+  { key: "pickup_done_time", label: "Ngày lấy hàng" },
+  { key: "ship_by_date", label: "Hạn giao vận" },
   { key: "payment_method", label: "Phương thức thanh toán" },
   { key: "buyer_payment_method", label: "Phương thức thanh toán của Người mua" },
   { key: "buyer_payment_method_details", label: "Buyer Payment Method Details_1" },
   { key: "instalment_plan", label: "Installment Plan (if applicable)" },
-  { key: "escrow_amount", label: "Tổng tiền đã thanh toán" },
-  { key: "buyer_total_amount", label: "Amount Paid By Buyer" },
-  { key: "refund_amount", label: "Số tiền hoàn lại" },
-  { key: "lost_compensation", label: "Đền bù đơn mất hàng" },
-  { key: "trade_in_bonus_by_seller", label: "Trade-in Bonus by Seller" },
+  { key: "shipping_carrier", label: "Đơn vị vận chuyển" },
+  { key: "courier_name", label: "Courier Name" },
+  { key: "tax_registration_code", label: "Mã Số Thuế" },
+
+  { key: "product_price", label: "Đơn giá gốc" },
+
   { key: "seller_voucher", label: "Mã ưu đãi do Người Bán chịu" },
   { key: "seller_cofunded_voucher", label: "Mã ưu đãi Đồng Tài Trợ do Người Bán chịu" },
   { key: "seller_coin_cash_back", label: "Mã hoàn xu do Người Bán chịu" },
@@ -1194,6 +1344,18 @@ const excelColumns = [
   { key: "shopee_voucher", label: "Shopee voucher" },
   { key: "bank_credit_card_promotion", label: "Ngân hàng khuyến mãi thanh toán trên Thẻ Tín Dụng" },
   { key: "shopee_credit_card_promotion", label: "Shopee khuyến mãi thanh toán trên Thẻ Tín Dụng" },
+  { key: "shopee_product_subsidy", label: "Sản phẩm được trợ giá từ Shopee" },
+  { key: "trade_in_bonus_by_seller", label: "Trade-in Bonus by Seller" },
+
+  { key: "discounted_product_price", label: "Đơn giá sau giảm" },
+  { key: "buyer_total_amount", label: "Amount Paid By Buyer" },
+  { key: "refund_amount", label: "Số tiền hoàn lại" },
+  { key: "item_refund_amount", label: "Tiền hoàn của SKU" },
+  { key: "return_item_price", label: "Tiền hàng hoàn của SKU" },
+
+  { key: "vat_tax", label: "Thuế GTGT" },
+  { key: "pit_tax", label: "Thuế TNCN" },
+
   { key: "commission_fee", label: "Phí cố định" },
   { key: "service_fee", label: "Phí Dịch Vụ" },
   { key: "seller_transaction_fee", label: "Phí xử lý giao dịch" },
@@ -1201,8 +1363,6 @@ const excelColumns = [
   { key: "affiliate_commission_fee", label: "Phí hoa hồng Tiếp thị liên kết" },
   { key: "piship_service_fee", label: "Phí dịch vụ PiShip" },
   { key: "display_service_fee", label: "Phí dịch vụ hiển thị NTTD (từ doanh thu đơn hàng)" },
-  { key: "vat_tax", label: "Thuế GTGT" },
-  { key: "pit_tax", label: "Thuế TNCN" },
   { key: "buyer_paid_shipping_fee", label: "Phí vận chuyển Người mua trả" },
   { key: "final_shipping_fee", label: "Phí vận chuyển thực tế" },
   { key: "shopee_shipping_rebate", label: "Phí vận chuyển được trợ giá từ Shopee" },
@@ -1210,10 +1370,11 @@ const excelColumns = [
   { key: "reverse_shipping_fee", label: "Phí vận chuyển trả hàng (đơn Trả hàng/hoàn tiền)" },
   { key: "piship_shipping_refund", label: "Phí vận chuyển được hoàn bởi PiShip" },
   { key: "failed_delivery_return_shipping_fee", label: "Phí vận chuyển trả hàng (đơn giao không thành công)" },
-  { key: "shipping_carrier", label: "Đơn vị vận chuyển" },
-  { key: "courier_name", label: "Courier Name" },
   { key: "buyer_installation_fee", label: "Phí lắp đặt người mua trả" },
   { key: "actual_installation_fee", label: "Phí lắp đặt thực tế" },
+
+  { key: "lost_compensation", label: "Đền bù đơn mất hàng" },
+  { key: "escrow_amount", label: "Tổng tiền đã thanh toán" },
   { key: "buyer_username", label: "Người Mua" },
 ];
 const excelColumnKeys = excelColumns.map((column) => column.key);
@@ -1229,6 +1390,28 @@ const defaultExcelOrderColumns = excelColumnKeys.filter(
     ].includes(key),
 );
 const defaultExcelSkuColumns = excelColumnKeys;
+const requiredOrderStatusExcelColumns = [
+  "order_status",
+  "order_status_label",
+  "create_time",
+  "update_time",
+  "completion_time",
+  "pay_time",
+  "pickup_done_time",
+  "ship_by_date",
+  "return_sn",
+  "return_status",
+  "return_reason",
+  "returned_quantity",
+  "item_refund_amount",
+  "return_item_price",
+];
+
+function ensureExcelColumns(columns: string[], requiredColumns: string[]) {
+  const selected = new Set(columns);
+  requiredColumns.forEach((key) => selected.add(key));
+  return excelColumnKeys.filter((key) => selected.has(key));
+}
 
 function mergeColumnKeys(orderColumns: string[], skuColumns: string[]) {
   return excelColumnKeys.filter(
@@ -1244,14 +1427,15 @@ function exportRevenueWorkbook(
   const exportRows = buildRevenueExportRows(rows);
   const selectedKeys = mergeColumnKeys(config.orderColumns, config.skuColumns);
   const selectedColumns = excelColumns.filter((column) => selectedKeys.includes(column.key));
+  const dataRows = exportRows.map((row) => {
+    const allowedKeys = row.rowType === "Sku" ? config.skuColumns : config.orderColumns;
+    return selectedColumns.map((column) =>
+      allowedKeys.includes(column.key) ? row.values[column.key] : "",
+    );
+  });
   const workbookRows: ExportCell[][] = [
     selectedColumns.map((column) => column.label),
-    ...exportRows.map((row) => {
-      const allowedKeys = row.rowType === "Sku" ? config.skuColumns : config.orderColumns;
-      return selectedColumns.map((column) =>
-        allowedKeys.includes(column.key) ? row.values[column.key] : "",
-      );
-    }),
+    ...dataRows,
   ];
   const workbook = createXlsxWorkbook("Doanh thu", workbookRows);
   const blob = new Blob([workbook], {
@@ -1275,7 +1459,9 @@ function buildRevenueExportRows(rows: OrderRow[]) {
     const order = row.raw_order;
     const escrow = row.raw_escrow || {};
     const income = asRecord(escrow.order_income);
+    const incomeDetail = asRecord(escrow.income_detail);
     const buyerPayment = asRecord(escrow.buyer_payment_info);
+    const returnDetails = asArray(escrow.return_details).map(asRecord);
     const packageList = asArray(order.package_list).map(asRecord);
     const firstPackage = packageList[0] ?? {};
     const orderItems = asArray(order.item_list).map(asRecord);
@@ -1289,7 +1475,9 @@ function buildRevenueExportRows(rows: OrderRow[]) {
         rowType: "Order",
         order,
         income,
+        incomeDetail,
         buyerPayment,
+        returnDetails,
         firstPackage,
         orderSn,
       }),
@@ -1303,7 +1491,9 @@ function buildRevenueExportRows(rows: OrderRow[]) {
           rowType: "Sku",
           order,
           income,
+          incomeDetail,
           buyerPayment,
+          returnDetails,
           firstPackage,
           orderSn,
           item,
@@ -1321,7 +1511,9 @@ function revenueRow({
   rowType,
   order,
   income,
+  incomeDetail,
   buyerPayment,
+  returnDetails,
   firstPackage,
   orderSn,
   item,
@@ -1331,7 +1523,9 @@ function revenueRow({
   rowType: "Order" | "Sku";
   order: Record<string, unknown>;
   income: Record<string, unknown>;
+  incomeDetail: Record<string, unknown>;
   buyerPayment: Record<string, unknown>;
+  returnDetails: Record<string, unknown>[];
   firstPackage: Record<string, unknown>;
   orderSn: string;
   item?: Record<string, unknown>;
@@ -1352,6 +1546,15 @@ function revenueRow({
   const itemOriginalPrice = incomeItemOriginalPrice ?? orderItemOriginalPrice;
   const itemDiscountedPrice =
     incomeItemDiscountedPrice ?? incomeItemPriceAfterSellerDiscount ?? orderItemDiscountedPrice;
+  const orderStatus = asString(order.order_status) || "";
+  const paymentCompletedTime = valueFrom(incomeDetail, "actual_payout_time", "released_time") || order.pay_time;
+  const matchedReturnItems = item ? findReturnItemsForItem(returnDetails, item, incomeItem) : [];
+  const returnSummary = summarizeReturnItems(returnDetails, matchedReturnItems, isSku);
+  const orderDiscountedPrice = valueFrom(income, "order_discounted_price", "order_selling_price");
+  const orderRefundAmount = asNumber(valueFrom(income, "seller_return_refund"));
+  const discountedProductPrice = isSku
+    ? subtractRefundFromAmount(itemDiscountedPrice, asNumber(returnSummary.refundAmount))
+    : addRefundBackToAmount(orderDiscountedPrice, orderRefundAmount);
   const orderOnly = (...keys: string[]) => (isSku ? "" : valueFrom(income, ...keys));
   const skuOnly = (...keys: string[]) => (isSku ? valueFrom(source, ...keys) : valueFrom(income, ...keys));
 
@@ -1361,6 +1564,8 @@ function revenueRow({
       transaction_id: index,
       row_type: rowType,
       order_sn: orderSn,
+      order_status: orderStatus,
+      order_status_label: orderStatusLabels[orderStatus] ?? orderStatus,
       order_type: "\u0110\u01a1n th\u01b0\u1eddng",
       return_request_sn: "",
       tax_registration_code: valueFrom(income, "tax_registration_code"),
@@ -1371,13 +1576,15 @@ function revenueRow({
       model_sku: item ? valueFrom(item, "model_sku") : "-",
       quantity: item ? quantity : "-",
       product_price: item ? itemOriginalPrice : valueFrom(income, "order_original_price", "original_price"),
-      discounted_product_price: item
-        ? itemDiscountedPrice
-        : valueFrom(income, "order_discounted_price", "order_selling_price"),
+      discounted_product_price: discountedProductPrice,
       shopee_product_subsidy: skuOnly("shopee_discount"),
       is_bestseller: "NO",
       create_time: excelDate(order.create_time),
-      pay_time: excelDate(order.pay_time),
+      update_time: excelDate(order.update_time),
+      completion_time: orderStatus === "COMPLETED" ? excelDate(order.update_time) : "",
+      pay_time: excelDate(paymentCompletedTime),
+      pickup_done_time: excelDate(order.pickup_done_time),
+      ship_by_date: excelDate(order.ship_by_date),
       payment_method: valueFrom(order, "payment_method"),
       buyer_payment_method: orderOnly("buyer_payment_method", "payment_method"),
       buyer_payment_method_details: isSku ? "" : valueFrom(buyerPayment, "buyer_payment_method"),
@@ -1385,6 +1592,12 @@ function revenueRow({
       escrow_amount: orderOnly("escrow_amount"),
       buyer_total_amount: orderOnly("buyer_total_amount", "buyer_total_amount_pri"),
       refund_amount: orderOnly("seller_return_refund"),
+      return_sn: returnSummary.returnSn,
+      return_status: returnSummary.status,
+      return_reason: returnSummary.reason,
+      returned_quantity: returnSummary.quantity,
+      item_refund_amount: returnSummary.refundAmount,
+      return_item_price: returnSummary.itemPrice,
       lost_compensation: orderOnly("seller_lost_compensation"),
       trade_in_bonus_by_seller: orderOnly("trade_in_bonus_by_seller"),
       seller_voucher: skuOnly("discount_from_voucher_seller", "voucher_from_seller"),
@@ -1421,6 +1634,103 @@ function revenueRow({
   };
 }
 
+function addRefundBackToAmount(value: unknown, refundAmount: number | undefined) {
+  const amount = asNumber(value);
+  if (amount === undefined) return value as ExportCell;
+  if (!refundAmount) return amount;
+  return amount + Math.abs(refundAmount);
+}
+
+function subtractRefundFromAmount(value: unknown, refundAmount: number | undefined) {
+  const amount = asNumber(value);
+  if (amount === undefined) return value as ExportCell;
+  if (!refundAmount) return amount;
+  return amount - Math.abs(refundAmount);
+}
+
+function findReturnItemsForItem(
+  returnDetails: Record<string, unknown>[],
+  item: Record<string, unknown>,
+  incomeItem?: Record<string, unknown>,
+) {
+  const itemId = asString(valueFrom(item, "item_id")) || asString(valueFrom(incomeItem || {}, "item_id"));
+  const modelId = asString(valueFrom(item, "model_id")) || asString(valueFrom(incomeItem || {}, "model_id"));
+  const itemSku = asString(valueFrom(item, "item_sku")) || asString(valueFrom(incomeItem || {}, "item_sku"));
+  const modelSku =
+    asString(valueFrom(item, "model_sku")) ||
+    asString(valueFrom(item, "variation_sku")) ||
+    asString(valueFrom(incomeItem || {}, "model_sku"));
+
+  return returnDetails.flatMap((detail) =>
+    asArray(detail.item)
+      .map(asRecord)
+      .filter((returnItem) => {
+        const returnItemId = asString(returnItem.item_id);
+        const returnModelId = asString(returnItem.model_id);
+        const returnItemSku = asString(returnItem.item_sku);
+        const returnVariationSku = asString(returnItem.variation_sku);
+
+        if (itemId && returnItemId && itemId !== returnItemId) return false;
+        if (modelId && returnModelId) return modelId === returnModelId;
+        if (modelSku && returnVariationSku) return modelSku === returnVariationSku;
+        if (itemSku && returnItemSku) return itemSku === returnItemSku;
+        return Boolean(itemId && returnItemId && itemId === returnItemId);
+      })
+      .map((returnItem) => ({ detail, item: returnItem })),
+  );
+}
+
+function summarizeReturnItems(
+  returnDetails: Record<string, unknown>[],
+  matchedItems: Array<{ detail: Record<string, unknown>; item: Record<string, unknown> }>,
+  isSku: boolean,
+) {
+  if (!isSku) {
+    return {
+      returnSn: joinReturnValues(returnDetails.map((detail) => asString(detail.return_sn))),
+      status: joinReturnValues(returnDetails.map((detail) => asString(detail.status))),
+      reason: joinReturnValues(
+        returnDetails.map(
+          (detail) => asString(detail.reassessed_request_reason) || asString(detail.reason),
+        ),
+      ),
+      quantity: "",
+      refundAmount: "",
+      itemPrice: "",
+    };
+  }
+
+  const quantity = matchedItems.reduce((sum, entry) => sum + (asNumber(entry.item.amount) ?? 0), 0);
+  const refundAmount = matchedItems.reduce((sum, entry) => {
+    const refund = asNumber(entry.item.refund_amount);
+    const itemPrice = asNumber(entry.item.item_price);
+    const amount = asNumber(entry.item.amount) ?? 1;
+    return sum + (refund ?? (itemPrice !== undefined ? itemPrice * amount : 0));
+  }, 0);
+  const itemPrice = matchedItems.reduce((sum, entry) => {
+    const price = asNumber(entry.item.item_price);
+    const amount = asNumber(entry.item.amount) ?? 1;
+    return sum + (price !== undefined ? price * amount : 0);
+  }, 0);
+
+  return {
+    returnSn: joinReturnValues(matchedItems.map((entry) => asString(entry.detail.return_sn))),
+    status: joinReturnValues(matchedItems.map((entry) => asString(entry.detail.status))),
+    reason: joinReturnValues(
+      matchedItems.map(
+        (entry) => asString(entry.detail.reassessed_request_reason) || asString(entry.detail.reason),
+      ),
+    ),
+    quantity: quantity || "",
+    refundAmount: refundAmount || "",
+    itemPrice: itemPrice || "",
+  };
+}
+
+function joinReturnValues(values: Array<string | undefined>) {
+  return [...new Set(values.filter(Boolean))].join(", ");
+}
+
 function findIncomeItem(items: Record<string, unknown>[], item: Record<string, unknown>) {
   const itemId = String(item.item_id ?? "");
   const modelId = String(item.model_id ?? "");
@@ -1454,7 +1764,12 @@ function excelDate(value: unknown) {
   if (typeof value !== "number" || value <= 0) {
     return "";
   }
-  return new Date(value * 1000).toISOString().slice(0, 10);
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    timeZone: "Asia/Ho_Chi_Minh",
+  }).format(new Date(value * 1000));
 }
 
 function createXlsxWorkbook(sheetName: string, rows: ExportCell[][]) {
@@ -1526,7 +1841,7 @@ function buildWorksheetXml(rows: ExportCell[][]) {
     })
     .join("");
 
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
   <cols>${colXml}</cols>
@@ -1679,11 +1994,11 @@ function JsonBlock({
   title: string;
 }) {
   return (
-    <section className="overflow-hidden rounded-lg border border-[#d9dee7]">
-      <h4 className="border-b border-[#d9dee7] bg-[#f8fafc] px-4 py-3 text-sm font-semibold text-[#344054]">
+    <section className="overflow-hidden rounded-lg border border-border">
+      <h4 className="border-b border-border bg-hover px-4 py-3 text-sm font-semibold text-secondary">
         {title}
       </h4>
-      <pre className="max-h-[520px] overflow-auto bg-[#101828] p-4 text-xs leading-relaxed text-[#e4e7ec]">
+      <pre className="max-h-[520px] overflow-auto bg-code-bg p-4 text-xs leading-relaxed text-code-text">
         {JSON.stringify(data, null, 2)}
       </pre>
     </section>

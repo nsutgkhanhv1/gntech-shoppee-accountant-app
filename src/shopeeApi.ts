@@ -8,6 +8,8 @@ export type DateRange = {
   to: string
 }
 
+export type DateMode = 'created' | 'paid' | 'completed'
+
 export type ColumnDef = {
   key: string
   label: string
@@ -41,6 +43,7 @@ function assertConfig(config: ShopeeConfig) {
 export async function fetchOrdersWithEscrow(
   config: ShopeeConfig,
   range: DateRange,
+  dateMode: DateMode = 'created',
 ): Promise<OrdersResponse> {
   assertConfig(config)
 
@@ -48,6 +51,7 @@ export async function fetchOrdersWithEscrow(
   url.searchParams.set('shop_id', config.shopId)
   url.searchParams.set('from', range.from)
   url.searchParams.set('to', range.to)
+  url.searchParams.set('date_mode', dateMode)
 
   const response = await fetch(url)
   const payload = (await response.json().catch(() => null)) as
