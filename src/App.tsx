@@ -1537,7 +1537,7 @@ function revenueRow({
   const orderItemOriginalPrice = item ? asNumber(item.model_original_price) : undefined;
   const orderItemDiscountedPrice = item ? asNumber(item.model_discounted_price) : undefined;
   const incomeItemOriginalPrice = asNumber(valueFrom(source, "original_price", "original_price_pri"));
-  const incomeItemDiscountedPrice = asNumber(valueFrom(source, "discounted_price", "selling_price"));
+  const incomeItemDiscountedPrice = asNumber(valueFrom(source, "selling_price", "discounted_price"));
   const incomeItemSellerDiscount = asNumber(valueFrom(source, "seller_discount"));
   const incomeItemPriceAfterSellerDiscount =
     typeof incomeItemOriginalPrice === "number" && typeof incomeItemSellerDiscount === "number"
@@ -1700,20 +1700,25 @@ function summarizeReturnItems(
     };
   }
 
-  const quantity = matchedItems.reduce((sum, entry) => sum + (asNumber(entry.item.amount) ?? 0), 0);
-  const refundAmount = matchedItems.reduce((sum, entry) => {
-    const refund = asNumber(entry.item.refund_amount);
+  // Chỉ các yêu cầu hoàn/trả ở trạng thái ACCEPTED mới thực sự được hoàn tiền
+  // (khớp với file Income Shopee: CANCELLED/REQUESTED/JUDGING không có refund).
+  const refundedItems = matchedItems.filter((entry) =>
+    String(entry.detail.status ?? "").toUpperCase() === "ACCEPTED",
+  );
+  const lineRefund = (entry: { detail: Record<string, unknown>; item: Record<string, unknown> }) => {
+    // Shopee Income dùng item_price * amount (giá trị SKU) cho "Số tiền hoàn lại",
+    // KHÔNG dùng refund_amount (tiền buyer thực trả sau voucher/coins).
     const itemPrice = asNumber(entry.item.item_price);
     const amount = asNumber(entry.item.amount) ?? 1;
-    return sum + (refund ?? (itemPrice !== undefined ? itemPrice * amount : 0));
-  }, 0);
-  const itemPrice = matchedItems.reduce((sum, entry) => {
-    const price = asNumber(entry.item.item_price);
-    const amount = asNumber(entry.item.amount) ?? 1;
-    return sum + (price !== undefined ? price * amount : 0);
-  }, 0);
+    return itemPrice !== undefined ? itemPrice * amount : 0;
+  };
+  const quantity = refundedItems.reduce((sum, entry) => sum + (asNumber(entry.item.amount) ?? 0), 0);
+  const refundAmount = refundedItems.reduce((sum, entry) => sum + lineRefund(entry), 0);
+  const itemPrice = refundedItems.reduce((sum, entry) => sum + lineRefund(entry), 0);
 
   return {
+    // return_sn/status/reason vẫn hiển thị tất cả yêu cầu hoàn (kể cả CANCELLED)
+    // để đối soát, nhưng tiền/số lượng chỉ tính cho ACCEPTED.
     returnSn: joinReturnValues(matchedItems.map((entry) => asString(entry.detail.return_sn))),
     status: joinReturnValues(matchedItems.map((entry) => asString(entry.detail.status))),
     reason: joinReturnValues(
