@@ -1469,6 +1469,13 @@ function buildRevenueExportRows(rows: OrderRow[]) {
     const orderSn = asString(order.order_sn) || row.order_sn;
     const itemRows = orderItems.length > 0 ? orderItems : incomeItems;
 
+    // Tính refund thực tế từng SKU = phân bổ |seller_return_refund| (order-level)
+    // cho các SKU có return ACCEPTED, prorated theo selling_price.
+    // Khớp với file Income Shopee (cột "Giá sản phẩm" / "Số tiền hoàn lại" dòng SKU),
+    // xử lý đúng cả hoàn một phần (partial refund).
+    const orderRefundTotal = Math.abs(asNumber(valueFrom(income, "seller_return_refund")) ?? 0);
+    const skuRefunds = computeSkuRefunds(itemRows, incomeItems, returnDetails, orderRefundTotal);
+
     output.push(
       revenueRow({
         index: transactionIndex++,
@@ -1483,7 +1490,7 @@ function buildRevenueExportRows(rows: OrderRow[]) {
       }),
     );
 
-    itemRows.forEach((item) => {
+    itemRows.forEach((item, itemIndex) => {
       const incomeItem = findIncomeItem(incomeItems, item);
       output.push(
         revenueRow({
@@ -1498,12 +1505,45 @@ function buildRevenueExportRows(rows: OrderRow[]) {
           orderSn,
           item,
           incomeItem,
+          skuRefund: skuRefunds[itemIndex],
         }),
       );
     });
   });
 
   return output;
+}
+
+// Phân bổ tổng tiền hoàn (|seller_return_refund|) cho các SKU có return ACCEPTED,
+// prorated theo selling_price. SKU không có return ACCEPTED → refund = 0.
+function computeSkuRefunds(
+  itemRows: Record<string, unknown>[],
+  incomeItems: Record<string, unknown>[],
+  returnDetails: Record<string, unknown>[],
+  totalRefund: number,
+): number[] {
+  const infos = itemRows.map((item) => {
+    const incomeItem = findIncomeItem(incomeItems, item);
+    const source =
+      incomeItem && Object.keys(incomeItem).length > 0 ? incomeItem : {};
+    const matched = findReturnItemsForItem(returnDetails, item, incomeItem);
+    const hasAccepted = matched.some(
+      (entry) => String(entry.detail.status ?? "").toUpperCase() === "ACCEPTED",
+    );
+    const sellingPrice =
+      asNumber(valueFrom(source, "selling_price", "discounted_price")) ??
+      asNumber(item.model_discounted_price) ??
+      0;
+    return { hasAccepted, sellingPrice };
+  });
+  const totalAcceptedSelling = infos
+    .filter((info) => info.hasAccepted)
+    .reduce((sum, info) => sum + (info.sellingPrice || 0), 0);
+
+  return infos.map((info) => {
+    if (!info.hasAccepted || totalAcceptedSelling <= 0) return 0;
+    return totalRefund * (info.sellingPrice / totalAcceptedSelling);
+  });
 }
 
 function revenueRow({
@@ -1518,6 +1558,7 @@ function revenueRow({
   orderSn,
   item,
   incomeItem,
+  skuRefund,
 }: {
   index: number;
   rowType: "Order" | "Sku";
@@ -1530,6 +1571,7 @@ function revenueRow({
   orderSn: string;
   item?: Record<string, unknown>;
   incomeItem?: Record<string, unknown>;
+  skuRefund?: number;
 }): RevenueExportRow {
   const isSku = rowType === "Sku";
   const source = incomeItem && Object.keys(incomeItem).length > 0 ? incomeItem : income;
@@ -1552,8 +1594,11 @@ function revenueRow({
   const returnSummary = summarizeReturnItems(returnDetails, matchedReturnItems, isSku);
   const orderDiscountedPrice = valueFrom(income, "order_discounted_price", "order_selling_price");
   const orderRefundAmount = asNumber(valueFrom(income, "seller_return_refund"));
+  // SKU: đơn giá sau giảm = selling_price − refund thực tế của SKU (prorated từ
+  // seller_return_refund). Order: cộng ngược refund để ra giá trước hoàn.
+  const skuRefundAmount = isSku ? Math.round(skuRefund ?? 0) : 0;
   const discountedProductPrice = isSku
-    ? subtractRefundFromAmount(itemDiscountedPrice, asNumber(returnSummary.refundAmount))
+    ? subtractRefundFromAmount(itemDiscountedPrice, skuRefundAmount)
     : addRefundBackToAmount(orderDiscountedPrice, orderRefundAmount);
   const orderOnly = (...keys: string[]) => (isSku ? "" : valueFrom(income, ...keys));
   const skuOnly = (...keys: string[]) => (isSku ? valueFrom(source, ...keys) : valueFrom(income, ...keys));
@@ -1596,8 +1641,10 @@ function revenueRow({
       return_status: returnSummary.status,
       return_reason: returnSummary.reason,
       returned_quantity: returnSummary.quantity,
-      item_refund_amount: returnSummary.refundAmount,
-      return_item_price: returnSummary.itemPrice,
+      // SKU: tiền hoàn của SKU = refund thực tế (prorated từ seller_return_refund).
+      // Order: để trống (sẽ dùng cột "Số tiền hoàn lại" order-level).
+      item_refund_amount: isSku ? (skuRefundAmount || "") : returnSummary.refundAmount,
+      return_item_price: isSku ? (skuRefundAmount || "") : returnSummary.itemPrice,
       lost_compensation: orderOnly("seller_lost_compensation"),
       trade_in_bonus_by_seller: orderOnly("trade_in_bonus_by_seller"),
       seller_voucher: skuOnly("discount_from_voucher_seller", "voucher_from_seller"),
@@ -1702,23 +1749,16 @@ function summarizeReturnItems(
 
   // Chỉ các yêu cầu hoàn/trả ở trạng thái ACCEPTED mới thực sự được hoàn tiền
   // (khớp với file Income Shopee: CANCELLED/REQUESTED/JUDGING không có refund).
+  // Tiền hoàn của SKU được tính ở computeSkuRefunds (prorated từ seller_return_refund),
+  // không dùng return_details.item[].refund_amount (tiền buyer thực trả, sai cho partial).
   const refundedItems = matchedItems.filter((entry) =>
     String(entry.detail.status ?? "").toUpperCase() === "ACCEPTED",
   );
-  const lineRefund = (entry: { detail: Record<string, unknown>; item: Record<string, unknown> }) => {
-    // Shopee Income dùng item_price * amount (giá trị SKU) cho "Số tiền hoàn lại",
-    // KHÔNG dùng refund_amount (tiền buyer thực trả sau voucher/coins).
-    const itemPrice = asNumber(entry.item.item_price);
-    const amount = asNumber(entry.item.amount) ?? 1;
-    return itemPrice !== undefined ? itemPrice * amount : 0;
-  };
   const quantity = refundedItems.reduce((sum, entry) => sum + (asNumber(entry.item.amount) ?? 0), 0);
-  const refundAmount = refundedItems.reduce((sum, entry) => sum + lineRefund(entry), 0);
-  const itemPrice = refundedItems.reduce((sum, entry) => sum + lineRefund(entry), 0);
 
   return {
     // return_sn/status/reason vẫn hiển thị tất cả yêu cầu hoàn (kể cả CANCELLED)
-    // để đối soát, nhưng tiền/số lượng chỉ tính cho ACCEPTED.
+    // để đối soát, nhưng số lượng chỉ tính cho ACCEPTED.
     returnSn: joinReturnValues(matchedItems.map((entry) => asString(entry.detail.return_sn))),
     status: joinReturnValues(matchedItems.map((entry) => asString(entry.detail.status))),
     reason: joinReturnValues(
@@ -1727,8 +1767,9 @@ function summarizeReturnItems(
       ),
     ),
     quantity: quantity || "",
-    refundAmount: refundAmount || "",
-    itemPrice: itemPrice || "",
+    // refundAmount/itemPrice không còn dùng (đã thay bằng skuRefund prorated).
+    refundAmount: "",
+    itemPrice: "",
   };
 }
 
