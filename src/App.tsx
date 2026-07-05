@@ -3,10 +3,11 @@ import type {
   ColumnDef,
   DateMode,
   DateRange,
+  OrdersProgress,
   OrderRow,
   ShopeeConfig,
 } from "./shopeeApi";
-import { fetchOrdersWithEscrow } from "./shopeeApi";
+import { streamOrdersWithEscrow } from "./shopeeApi";
 
 type Page = "orders" | "columns" | "excel";
 
@@ -237,7 +238,9 @@ function App() {
     ),
   );
   const [selectedRow, setSelectedRow] = useState<OrderRow | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  // 'idle' = Tải dữ liệu primary; 'data-ready' = Export primary; 'exporting' = đang xuất.
+  const [loadPhase, setLoadPhase] = useState<"idle" | "loading" | "data-ready" | "exporting">("idle");
+  const [loadProgress, setLoadProgress] = useState<OrdersProgress | null>(null);
   const [error, setError] = useState("");
 
   const activeColumns = useMemo(
@@ -313,9 +316,12 @@ function App() {
       return;
     }
 
-    setIsLoading(true);
+    setLoadPhase("loading");
+    setLoadProgress(null);
     try {
-      const result = await fetchOrdersWithEscrow(config, range, dateMode);
+      const result = await streamOrdersWithEscrow(config, range, dateMode, (progress) =>
+        setLoadProgress(progress),
+      );
       setRows(result.rows);
       setColumns(result.columns.length > 0 ? result.columns : fallbackColumns);
       setVisibleColumns((current) => {
@@ -331,14 +337,16 @@ function App() {
         return next.length > 0 ? next : defaultVisibleColumns;
       });
       setSelectedRow(null);
+      setLoadPhase("data-ready");
+      setLoadProgress(null);
     } catch (loadError) {
       setError(
         loadError instanceof Error
           ? loadError.message
           : "Không tải được dữ liệu Shopee.",
       );
-    } finally {
-      setIsLoading(false);
+      setLoadPhase("idle");
+      setLoadProgress(null);
     }
   }
 
@@ -349,10 +357,17 @@ function App() {
     }
 
     setError("");
-    exportRevenueWorkbook(rows, range, {
-      orderColumns: visibleExcelOrderColumns,
-      skuColumns: visibleExcelSkuColumns,
-    });
+    setLoadPhase("exporting");
+    try {
+      exportRevenueWorkbook(rows, range, {
+        orderColumns: visibleExcelOrderColumns,
+        skuColumns: visibleExcelSkuColumns,
+      });
+      // Sau khi xuất xong, nút Tải dữ liệu quay về primary.
+      setLoadPhase("idle");
+    } catch {
+      setLoadPhase("data-ready");
+    }
   }
 
   return (
@@ -439,7 +454,6 @@ function App() {
               config={config}
               dateMode={dateMode}
               error={error}
-              isLoading={isLoading}
               onConfigChange={updateConfig}
               onDateModeChange={updateDateMode}
               onExportOrders={exportOrders}
@@ -448,6 +462,8 @@ function App() {
               onSelectRow={setSelectedRow}
               range={range}
               rows={rows}
+              loadPhase={loadPhase}
+              loadProgress={loadProgress}
               totals={totals}
             />
           ) : page === "columns" ? (
@@ -545,7 +561,6 @@ function OrdersPage({
   config,
   dateMode,
   error,
-  isLoading,
   onConfigChange,
   onDateModeChange,
   onExportOrders,
@@ -554,13 +569,14 @@ function OrdersPage({
   onSelectRow,
   range,
   rows,
+  loadPhase,
+  loadProgress,
   totals,
 }: {
   activeColumns: ColumnDef[];
   config: ShopeeConfig;
   dateMode: DateMode;
   error: string;
-  isLoading: boolean;
   onConfigChange: (config: ShopeeConfig) => void;
   onDateModeChange: (mode: DateMode) => void;
   onExportOrders: () => void;
@@ -569,6 +585,8 @@ function OrdersPage({
   onSelectRow: (row: OrderRow) => void;
   range: DateRange;
   rows: OrderRow[];
+  loadPhase: "idle" | "loading" | "data-ready" | "exporting";
+  loadProgress: OrdersProgress | null;
   totals: { orders: number; gross: number; escrow: number; fees: number };
 }) {
   return (
@@ -619,21 +637,44 @@ function OrdersPage({
           </label>
           <button
             type="button"
-            className="h-10 rounded-full bg-accent px-5 text-sm font-bold text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-accent-disabled"
-            disabled={isLoading}
+            className={`h-10 rounded-full px-5 text-sm font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+              loadPhase === "idle" || loadPhase === "loading"
+                ? "bg-accent text-white hover:bg-accent-hover disabled:bg-accent-disabled"
+                : "border border-border-strong bg-surface text-secondary hover:bg-canvas"
+            }`}
+            disabled={loadPhase === "loading" || loadPhase === "exporting"}
             onClick={onLoadOrders}
           >
-            {isLoading ? "Đang tải..." : "Tải dữ liệu"}
+            {loadPhase === "loading" ? (
+              <span className="inline-flex items-center gap-2">
+                <Spinner /> Đang tải...
+              </span>
+            ) : (
+              "Tải dữ liệu"
+            )}
           </button>
           <button
             type="button"
-            className="h-10 rounded-md border border-border-strong bg-surface px-4 text-sm font-semibold text-secondary transition-colors hover:bg-canvas disabled:cursor-not-allowed disabled:bg-disabled disabled:text-muted"
-            disabled={isLoading || rows.length === 0}
+            className={`h-10 rounded-full px-5 text-sm font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+              loadPhase === "data-ready" || loadPhase === "exporting"
+                ? "bg-accent text-white hover:bg-accent-hover disabled:bg-accent-disabled"
+                : "border border-border-strong bg-surface text-secondary hover:bg-canvas"
+            }`}
+            disabled={loadPhase === "loading" || rows.length === 0}
             onClick={onExportOrders}
           >
-            Export XLSX
+            {loadPhase === "exporting" ? (
+              <span className="inline-flex items-center gap-2">
+                <Spinner /> Đang xuất...
+              </span>
+            ) : (
+              "Export XLSX"
+            )}
           </button>
         </div>
+        {loadPhase === "loading" ? (
+          <LoadProgress progress={loadProgress} dateMode={dateMode} />
+        ) : null}
         {error ? (
           <div className="mt-3 rounded-md border border-danger-border bg-danger-bg px-3 py-2 text-sm text-danger">
             {error}
@@ -654,6 +695,118 @@ function OrdersPage({
         onSelectRow={onSelectRow}
       />
     </div>
+  );
+}
+
+const LOAD_PHASE_LABELS: Record<OrdersProgress["phase"], string> = {
+  income: "Lấy danh sách thanh toán",
+  orders: "Lấy danh sách đơn hàng",
+  detail: "Lấy chi tiết đơn hàng",
+  escrow: "Lấy thông tin escrow & hoàn/trả",
+};
+
+function LoadProgress({
+  progress,
+  dateMode,
+}: {
+  progress: OrdersProgress | null;
+  dateMode: DateMode;
+}) {
+  // Thứ tự các phase tùy dateMode: paid không có phase 'orders'.
+  const phases: OrdersProgress["phase"][] =
+    dateMode === "paid"
+      ? ["income", "detail", "escrow"]
+      : ["orders", "detail", "escrow"];
+  const currentPhase = progress?.phase;
+  const currentIndex = currentPhase ? phases.indexOf(currentPhase) : -1;
+
+  return (
+    <div className="mt-3 rounded-md border border-border-strong bg-canvas px-4 py-3">
+      <ul className="space-y-2">
+        {phases.map((phase, index) => {
+          const isDone = currentIndex > index;
+          const isActive = currentIndex === index;
+          return (
+            <li
+              key={phase}
+              className="flex items-center gap-2 text-sm"
+            >
+              <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center">
+                {isDone ? (
+                  <CheckIcon />
+                ) : isActive ? (
+                  <Spinner />
+                ) : (
+                  <span className="h-2 w-2 rounded-full bg-border-strong" />
+                )}
+              </span>
+              <span
+                className={
+                  isActive
+                    ? "font-medium text-primary"
+                    : isDone
+                      ? "text-muted line-through"
+                      : "text-muted"
+                }
+              >
+                {LOAD_PHASE_LABELS[phase]}
+              </span>
+              {isActive && progress && progress.total > 0 ? (
+                <span className="ml-auto font-mono text-xs text-muted">
+                  {progress.loaded}/{progress.total}
+                </span>
+              ) : isActive && progress && progress.loaded > 0 ? (
+                <span className="ml-auto font-mono text-xs text-muted">
+                  {progress.loaded}...
+                </span>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+function Spinner() {
+  return (
+    <svg
+      className="h-4 w-4 animate-spin text-current"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
+      <circle
+        className="opacity-25"
+        cx="12"
+        cy="12"
+        r="10"
+        stroke="currentColor"
+        strokeWidth="4"
+      />
+      <path
+        className="opacity-75"
+        fill="currentColor"
+        d="M4 12a8 8 0 0 1 8-8V0C5.4 0 0 5.4 0 12h4z"
+      />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg
+      className="h-4 w-4 text-accent"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M5 13l4 4L19 7" />
+    </svg>
   );
 }
 
