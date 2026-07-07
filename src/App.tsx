@@ -251,19 +251,15 @@ function App() {
   const totals = useMemo(
     () => ({
       orders: rows.length,
-      gross: rows.reduce(
-        (sum, row) => sum + numberValue(row.values.total_amount),
-        0,
-      ),
-      escrow: rows.reduce(
-        (sum, row) => sum + numberValue(row.values.escrow_amount),
-        0,
-      ),
-      fees: rows.reduce(
-        (sum, row) =>
-          sum +
-          numberValue(row.values.commission_fee) +
-          numberValue(row.values.service_fee),
+      // Đơn giá sau giảm theo order = order_discounted_price + |seller_return_refund|
+      // (cộng ngược tiền hoàn để ra giá trước hoàn, khớp dòng Order trong Excel).
+      discountedTotal: rows.reduce((sum, row) => {
+        const discounted = numberValue(row.values.order_discounted_price);
+        const refund = Math.abs(numberValue(row.values.seller_return_refund));
+        return sum + discounted + refund;
+      }, 0),
+      refundTotal: rows.reduce(
+        (sum, row) => sum + numberValue(row.values.seller_return_refund),
         0,
       ),
     }),
@@ -587,7 +583,7 @@ function OrdersPage({
   rows: OrderRow[];
   loadPhase: "idle" | "loading" | "data-ready" | "exporting";
   loadProgress: OrdersProgress | null;
-  totals: { orders: number; gross: number; escrow: number; fees: number };
+  totals: { orders: number; discountedTotal: number; refundTotal: number };
 }) {
   return (
     <div className="flex-1 space-y-5 overflow-auto p-4 sm:p-6">
@@ -682,11 +678,10 @@ function OrdersPage({
         ) : null}
       </section>
 
-      <section className="grid gap-3 md:grid-cols-4">
+      <section className="grid gap-3 md:grid-cols-3">
         <Metric label="Số đơn" value={String(totals.orders)} />
-        <Metric label="Tổng giá trị đơn" value={formatCurrency(totals.gross)} />
-        <Metric label="Tổng escrow" value={formatCurrency(totals.escrow)} />
-        <Metric label="Tổng phí" value={formatCurrency(totals.fees)} />
+        <Metric label="Tổng đơn giá sau giảm" value={formatCurrency(totals.discountedTotal)} />
+        <Metric label="Tổng số tiền hoàn" value={formatCurrency(totals.refundTotal)} />
       </section>
 
       <DataTable
@@ -1487,7 +1482,9 @@ const excelColumns = [
   { key: "tax_registration_code", label: "Mã Số Thuế" },
 
   { key: "product_price", label: "Đơn giá gốc" },
-
+  { key: "seller_product_subsidy", label: "Số tiền bạn trợ giá cho sản phẩm" },
+  { key: "discounted_product_price", label: "Đơn giá sau giảm" },
+  { key: "refund_amount", label: "Số tiền hoàn lại" },
   { key: "seller_voucher", label: "Mã ưu đãi do Người Bán chịu" },
   { key: "seller_cofunded_voucher", label: "Mã ưu đãi Đồng Tài Trợ do Người Bán chịu" },
   { key: "seller_coin_cash_back", label: "Mã hoàn xu do Người Bán chịu" },
@@ -1500,9 +1497,7 @@ const excelColumns = [
   { key: "shopee_product_subsidy", label: "Sản phẩm được trợ giá từ Shopee" },
   { key: "trade_in_bonus_by_seller", label: "Trade-in Bonus by Seller" },
 
-  { key: "discounted_product_price", label: "Đơn giá sau giảm" },
   { key: "buyer_total_amount", label: "Amount Paid By Buyer" },
-  { key: "refund_amount", label: "Số tiền hoàn lại" },
   { key: "item_refund_amount", label: "Tiền hoàn của SKU" },
   { key: "return_item_price", label: "Tiền hàng hoàn của SKU" },
 
@@ -1517,14 +1512,14 @@ const excelColumns = [
   { key: "piship_service_fee", label: "Phí dịch vụ PiShip" },
   { key: "display_service_fee", label: "Phí dịch vụ hiển thị NTTD (từ doanh thu đơn hàng)" },
   { key: "buyer_paid_shipping_fee", label: "Phí vận chuyển Người mua trả" },
-  { key: "final_shipping_fee", label: "Phí vận chuyển thực tế" },
+  { key: "actual_shipping_fee", label: "Phí vận chuyển thực tế" },
   { key: "shopee_shipping_rebate", label: "Phí vận chuyển được trợ giá từ Shopee" },
+  { key: "shipping_fee_discount_from_3pl", label: "Shipping Fee Discount from 3PL" },
   { key: "seller_shipping_discount", label: "Phí vận chuyển - Người bán hỗ trợ" },
   { key: "reverse_shipping_fee", label: "Phí vận chuyển trả hàng (đơn Trả hàng/hoàn tiền)" },
   { key: "piship_shipping_refund", label: "Phí vận chuyển được hoàn bởi PiShip" },
   { key: "failed_delivery_return_shipping_fee", label: "Phí vận chuyển trả hàng (đơn giao không thành công)" },
   { key: "buyer_installation_fee", label: "Phí lắp đặt người mua trả" },
-  { key: "actual_installation_fee", label: "Phí lắp đặt thực tế" },
 
   { key: "lost_compensation", label: "Đền bù đơn mất hàng" },
   { key: "escrow_amount", label: "Tổng tiền đã thanh toán" },
@@ -1667,8 +1662,12 @@ function buildRevenueExportRows(rows: OrderRow[]) {
   return output;
 }
 
-// Phân bổ tổng tiền hoàn (|seller_return_refund|) cho các SKU có return ACCEPTED,
-// prorated theo selling_price. SKU không có return ACCEPTED → refund = 0.
+// Tính tiền hoàn thực tế của từng SKU:
+// - Ưu tiên lấy trực tiếp `item.refund_amount` từ return detail (chính xác cho shop
+//   được whitelist Partial Qty RR, đúng cả khi hoàn 1 trong nhiều SKU).
+// - Nếu không có (shop chưa whitelist), prorate |seller_return_refund| (order-level)
+//   cho các SKU có return được chấp nhận, theo selling_price.
+// SKU không có return được chấp nhận → refund = 0.
 function computeSkuRefunds(
   itemRows: Record<string, unknown>[],
   incomeItems: Record<string, unknown>[],
@@ -1680,21 +1679,35 @@ function computeSkuRefunds(
     const source =
       incomeItem && Object.keys(incomeItem).length > 0 ? incomeItem : {};
     const matched = findReturnItemsForItem(returnDetails, item, incomeItem);
-    const hasAccepted = matched.some(
-      (entry) => String(entry.detail.status ?? "").toUpperCase() === "ACCEPTED",
+    // Trạng thái được chấp nhận: khớp cả ACCEPTED và *_ACCEPTED (vd. RETURN_ACCEPTED).
+    const acceptedItems = matched.filter((entry) =>
+      String(entry.detail.status ?? "")
+        .toUpperCase()
+        .includes("ACCEPTED"),
     );
+    const hasAccepted = acceptedItems.length > 0;
+    // item.refund_amount từ return detail: tiền hoàn chính xác của SKU
+    // (chỉ shop whitelist Partial Qty RR). Ưu tiên nếu > 0.
+    const directRefund = acceptedItems.reduce((sum, entry) => {
+      const value = asNumber(entry.item.refund_amount) ?? 0;
+      return sum + Math.abs(value);
+    }, 0);
     const sellingPrice =
       asNumber(valueFrom(source, "selling_price", "discounted_price")) ??
       asNumber(item.model_discounted_price) ??
       0;
-    return { hasAccepted, sellingPrice };
+    return { hasAccepted, directRefund, sellingPrice };
   });
   const totalAcceptedSelling = infos
     .filter((info) => info.hasAccepted)
     .reduce((sum, info) => sum + (info.sellingPrice || 0), 0);
 
   return infos.map((info) => {
-    if (!info.hasAccepted || totalAcceptedSelling <= 0) return 0;
+    if (!info.hasAccepted) return 0;
+    // Ưu tiên refund trực tiếp từng SKU nếu có (Partial Qty RR).
+    if (info.directRefund > 0) return info.directRefund;
+    // Fallback: prorate tổng refund theo selling_price.
+    if (totalAcceptedSelling <= 0) return 0;
     return totalRefund * (info.sellingPrice / totalAcceptedSelling);
   });
 }
@@ -1747,11 +1760,20 @@ function revenueRow({
   const returnSummary = summarizeReturnItems(returnDetails, matchedReturnItems, isSku);
   const orderDiscountedPrice = valueFrom(income, "order_discounted_price", "order_selling_price");
   const orderRefundAmount = asNumber(valueFrom(income, "seller_return_refund"));
-  // SKU: đơn giá sau giảm = selling_price − refund thực tế của SKU (prorated từ
-  // seller_return_refund). Order: cộng ngược refund để ra giá trước hoàn.
+  // SKU: đơn giá sau giảm:
+  // - SKU có hoàn trả + order hoàn toàn (|refund| >= order disc) -> 0.
+  // - SKU có hoàn trả + order hoàn 1 phần -> order disc − |refund| (phần còn lại).
+  // - SKU không hoàn trả -> giữ nguyên selling_price.
+  // Order: cộng ngược refund để ra giá trước hoàn.
   const skuRefundAmount = isSku ? Math.round(skuRefund ?? 0) : 0;
+  const orderRefundAbs = Math.abs(orderRefundAmount ?? 0);
+  const orderDiscPreRefund = asNumber(addRefundBackToAmount(orderDiscountedPrice, orderRefundAmount)) ?? 0;
+  const returnedQuantity = asNumber(returnSummary.quantity) ?? 0;
+  const skuHasReturn = returnedQuantity > 0 || skuRefundAmount > 0;
   const discountedProductPrice = isSku
-    ? subtractRefundFromAmount(itemDiscountedPrice, skuRefundAmount)
+    ? skuHasReturn
+      ? Math.max(0, Math.round(orderDiscPreRefund - orderRefundAbs))
+      : subtractRefundFromAmount(itemDiscountedPrice, 0)
     : addRefundBackToAmount(orderDiscountedPrice, orderRefundAmount);
   const orderOnly = (...keys: string[]) => (isSku ? "" : valueFrom(income, ...keys));
   const skuOnly = (...keys: string[]) => (isSku ? valueFrom(source, ...keys) : valueFrom(income, ...keys));
@@ -1774,6 +1796,7 @@ function revenueRow({
       model_sku: item ? valueFrom(item, "model_sku") : "-",
       quantity: item ? quantity : "-",
       product_price: item ? itemOriginalPrice : valueFrom(income, "order_original_price", "original_price"),
+      seller_product_subsidy: isSku ? skuOnly("seller_discount") : orderOnly("order_seller_discount", "seller_discount"),
       discounted_product_price: discountedProductPrice,
       shopee_product_subsidy: skuOnly("shopee_discount"),
       is_bestseller: "NO",
@@ -1789,7 +1812,7 @@ function revenueRow({
       instalment_plan: orderOnly("instalment_plan"),
       escrow_amount: orderOnly("escrow_amount"),
       buyer_total_amount: orderOnly("buyer_total_amount", "buyer_total_amount_pri"),
-      refund_amount: orderOnly("seller_return_refund"),
+      refund_amount: isSku ? (skuRefundAmount || "") : orderOnly("seller_return_refund"),
       return_sn: returnSummary.returnSn,
       return_status: returnSummary.status,
       return_reason: returnSummary.reason,
@@ -1819,16 +1842,16 @@ function revenueRow({
       vat_tax: orderOnly("withholding_vat_tax", "final_product_vat_tax"),
       pit_tax: orderOnly("withholding_pit_tax"),
       buyer_paid_shipping_fee: orderOnly("buyer_paid_shipping_fee"),
-      final_shipping_fee: orderOnly("final_shipping_fee", "actual_shipping_fee"),
+      actual_shipping_fee: orderOnly("actual_shipping_fee"),
       shopee_shipping_rebate: orderOnly("shopee_shipping_rebate"),
+      shipping_fee_discount_from_3pl: orderOnly("shipping_fee_discount_from_3pl"),
       seller_shipping_discount: orderOnly("seller_shipping_discount"),
-      reverse_shipping_fee: orderOnly("reverse_shipping_fee"),
-      piship_shipping_refund: orderOnly("final_return_to_seller_shipping_fee"),
+      reverse_shipping_fee: orderOnly("final_return_to_seller_shipping_fee"),
+      piship_shipping_refund: orderOnly("reverse_shipping_fee"),
       failed_delivery_return_shipping_fee: orderOnly("reverse_shipping_fee_sst"),
       shipping_carrier: valueFrom(order, "shipping_carrier"),
       courier_name: valueFrom(firstPackage, "shipping_carrier"),
       buyer_installation_fee: isSku ? "" : valueFrom(buyerPayment, "buyer_paid_packaging_fee"),
-      actual_installation_fee: orderOnly("actual_shipping_fee"),
       buyer_username: valueFrom(order, "buyer_username"),
     },
   };
