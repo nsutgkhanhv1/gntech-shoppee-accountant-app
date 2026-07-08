@@ -1470,14 +1470,14 @@ const excelColumns = [
 
   { key: "product_price", label: "Đơn giá gốc" },
   { key: "seller_product_subsidy", label: "Số tiền bạn trợ giá cho sản phẩm" },
-  { key: "discounted_product_price", label: "Đơn giá sau giảm" },
-  { key: "delivery_revenue", label: "Doanh thu khi giao hàng" },
-  { key: "refund_amount", label: "Số tiền hoàn lại" },
   { key: "seller_voucher", label: "Mã ưu đãi do Người Bán chịu" },
   { key: "seller_cofunded_voucher", label: "Mã ưu đãi Đồng Tài Trợ do Người Bán chịu" },
   { key: "seller_coin_cash_back", label: "Mã hoàn xu do Người Bán chịu" },
   { key: "seller_cofunded_coin_cash_back", label: "Mã hoàn xu Đồng Tài Trợ do Người Bán chịu" },
   { key: "voucher_code", label: "Mã voucher" },
+  { key: "delivery_revenue", label: "Doanh thu khi giao hàng" },
+  { key: "refund_amount", label: "Số tiền hoàn lại" },
+  { key: "discounted_product_price", label: "Đơn giá sau giảm" },
   { key: "coins", label: "Shopee xu" },
   { key: "shopee_voucher", label: "Shopee voucher" },
   { key: "bank_credit_card_promotion", label: "Ngân hàng khuyến mãi thanh toán trên Thẻ Tín Dụng" },
@@ -1674,6 +1674,7 @@ function buildRevenueExportRows(rows: OrderRow[]) {
     // xử lý đúng cả hoàn một phần (partial refund).
     const orderRefundTotal = Math.abs(asNumber(valueFrom(income, "seller_return_refund")) ?? 0);
     const skuRefunds = computeSkuRefunds(itemRows, incomeItems, returnDetails, orderRefundTotal);
+    const prorateRatios = computeProrateRatios(itemRows, incomeItems);
 
     itemRows.forEach((item, itemIndex) => {
       const incomeItem = findIncomeItem(incomeItems, item);
@@ -1691,6 +1692,8 @@ function buildRevenueExportRows(rows: OrderRow[]) {
           item,
           incomeItem,
           skuRefund: skuRefunds[itemIndex],
+          prorateRatio: prorateRatios[itemIndex],
+          isFirstSku: itemIndex === 0,
         }),
       );
     });
@@ -1743,6 +1746,28 @@ function computeSkuRefunds(
   });
 }
 
+// Tỷ lệ prorate cho từng SKU theo selling_price, để phân bổ các field order-level
+// (thuế, phí, escrow...) xuống SKU — khớp cách Shopee hiển thị ở file Income
+// (sum các dòng SKU = dòng Order).
+function computeProrateRatios(
+  itemRows: Record<string, unknown>[],
+  incomeItems: Record<string, unknown>[],
+): number[] {
+  const prices = itemRows.map((item) => {
+    const incomeItem = findIncomeItem(incomeItems, item);
+    const source =
+      incomeItem && Object.keys(incomeItem).length > 0 ? incomeItem : {};
+    return (
+      asNumber(valueFrom(source, "selling_price", "discounted_price")) ??
+      asNumber(item.model_discounted_price) ??
+      0
+    );
+  });
+  const total = prices.reduce((sum, p) => sum + (p || 0), 0);
+  if (total <= 0) return prices.map(() => 0);
+  return prices.map((p) => (p || 0) / total);
+}
+
 function revenueRow({
   index,
   rowType,
@@ -1756,6 +1781,8 @@ function revenueRow({
   item,
   incomeItem,
   skuRefund,
+  prorateRatio,
+  isFirstSku,
 }: {
   index: number;
   rowType: "Order" | "Sku";
@@ -1769,6 +1796,8 @@ function revenueRow({
   item?: Record<string, unknown>;
   incomeItem?: Record<string, unknown>;
   skuRefund?: number;
+  prorateRatio?: number;
+  isFirstSku?: boolean;
 }): RevenueExportRow {
   const isSku = rowType === "Sku";
   const source = incomeItem && Object.keys(incomeItem).length > 0 ? incomeItem : income;
@@ -1806,7 +1835,21 @@ function revenueRow({
       ? Math.max(0, Math.round(orderDiscPreRefund - orderRefundAbs))
       : subtractRefundFromAmount(itemDiscountedPrice, 0)
     : addRefundBackToAmount(orderDiscountedPrice, orderRefundAmount);
-  const orderOnly = (...keys: string[]) => (isSku ? "" : valueFrom(income, ...keys));
+  // Các field mức Order (thuế, phí, escrow, shipping...) không có ở mức SKU.
+  // Các field mức Order (thuế, phí, escrow, shipping...) không có ở mức SKU.
+  // Prorate theo selling_price xuống SKU (khớp file Income Shopee: sum SKU = Order).
+  // Một số field Shopee để trống ở SKU → trả "".
+  const ratio = prorateRatio ?? 0;
+  const prorate = (...keys: string[]) => {
+    const value = asNumber(valueFrom(income, ...keys)) ?? 0;
+    return Math.round(value * ratio);
+  };
+  // Phí vận chuyển / escrow: Shopee prorate theo cơ sở khác (cân nặng), không phải
+  // selling_price → prorate theo giá sẽ sai. Hiện nguyên giá trị order ở dòng SKU đầu,
+  // trống ở các SKU sau (sum đúng, không nhân đôi).
+  const firstSkuOnly = (...keys: string[]) =>
+    isFirstSku ? valueFrom(income, ...keys) : "";
+  const orderOnly = (...keys: string[]) => valueFrom(income, ...keys);
   const skuOnly = (...keys: string[]) => (isSku ? valueFrom(source, ...keys) : valueFrom(income, ...keys));
 
   // "Doanh thu khi giao hàng" = selling_price − các khoản giảm do Người bán chịu.
@@ -1873,8 +1916,8 @@ function revenueRow({
       buyer_payment_method: orderOnly("buyer_payment_method", "payment_method"),
       buyer_payment_method_details: isSku ? "" : valueFrom(buyerPayment, "buyer_payment_method"),
       instalment_plan: orderOnly("instalment_plan"),
-      escrow_amount: orderOnly("escrow_amount"),
-      buyer_total_amount: orderOnly("buyer_total_amount", "buyer_total_amount_pri"),
+      escrow_amount: firstSkuOnly("escrow_amount"),
+      buyer_total_amount: "",
       refund_amount: isSku ? (skuRefundAmount || "") : orderOnly("seller_return_refund"),
       return_sn: returnSummary.returnSn,
       return_status: returnStatusVi,
@@ -1885,8 +1928,8 @@ function revenueRow({
       item_refund_amount: isSku ? (skuRefundAmount || "") : returnSummary.refundAmount,
       return_item_price: isSku ? (skuRefundAmount || "") : returnSummary.itemPrice,
       delivery_revenue: Math.round(deliveryRevenue),
-      lost_compensation: orderOnly("seller_lost_compensation"),
-      trade_in_bonus_by_seller: orderOnly("trade_in_bonus_by_seller"),
+      lost_compensation: "",
+      trade_in_bonus_by_seller: prorate("trade_in_bonus_by_seller"),
       seller_voucher: skuOnly("discount_from_voucher_seller", "voucher_from_seller"),
       seller_cofunded_voucher: "",
       seller_coin_cash_back: "",
@@ -1894,28 +1937,30 @@ function revenueRow({
       voucher_code: isSku ? "" : voucherCodes(income),
       coins: skuOnly("discount_from_coin", "coins"),
       shopee_voucher: skuOnly("discount_from_voucher_shopee", "voucher_from_shopee"),
-      bank_credit_card_promotion: orderOnly("credit_card_promotion"),
-      shopee_credit_card_promotion: orderOnly("payment_promotion"),
-      commission_fee: orderOnly("commission_fee", "net_commission_fee"),
-      service_fee: orderOnly("service_fee", "net_service_fee"),
-      seller_transaction_fee: orderOnly("seller_transaction_fee"),
+      bank_credit_card_promotion: "",
+      shopee_credit_card_promotion: "",
+      commission_fee: prorate("commission_fee", "net_commission_fee"),
+      service_fee: prorate("service_fee", "net_service_fee"),
+      seller_transaction_fee: prorate("seller_transaction_fee"),
       transaction_fee_rate: "",
       affiliate_commission_fee: skuOnly("ams_commission_fee", "order_ams_commission_fee"),
-      piship_service_fee: orderOnly("fbs_fee"),
-      display_service_fee: orderOnly("ads_escrow_top_up_fee_or_technical_support_fee"),
-      vat_tax: orderOnly("withholding_vat_tax", "final_product_vat_tax"),
-      pit_tax: orderOnly("withholding_pit_tax"),
-      buyer_paid_shipping_fee: orderOnly("buyer_paid_shipping_fee"),
-      actual_shipping_fee: orderOnly("actual_shipping_fee"),
-      shopee_shipping_rebate: orderOnly("shopee_shipping_rebate"),
-      shipping_fee_discount_from_3pl: orderOnly("shipping_fee_discount_from_3pl"),
-      seller_shipping_discount: orderOnly("seller_shipping_discount"),
-      reverse_shipping_fee: orderOnly("final_return_to_seller_shipping_fee"),
-      piship_shipping_refund: orderOnly("reverse_shipping_fee"),
-      failed_delivery_return_shipping_fee: orderOnly("reverse_shipping_fee_sst"),
+      piship_service_fee: "",
+      display_service_fee: prorate("ads_escrow_top_up_fee_or_technical_support_fee"),
+      vat_tax: prorate("withholding_vat_tax", "final_product_vat_tax"),
+      pit_tax: prorate("withholding_pit_tax"),
+      buyer_paid_shipping_fee: firstSkuOnly("buyer_paid_shipping_fee"),
+      actual_shipping_fee: firstSkuOnly("actual_shipping_fee"),
+      shopee_shipping_rebate: firstSkuOnly("shopee_shipping_rebate"),
+      shipping_fee_discount_from_3pl: firstSkuOnly("shipping_fee_discount_from_3pl"),
+      seller_shipping_discount: "",
+      reverse_shipping_fee: firstSkuOnly("final_return_to_seller_shipping_fee"),
+      piship_shipping_refund: firstSkuOnly("reverse_shipping_fee"),
+      failed_delivery_return_shipping_fee: firstSkuOnly("reverse_shipping_fee_sst"),
       shipping_carrier: valueFrom(order, "shipping_carrier"),
       courier_name: valueFrom(firstPackage, "shipping_carrier"),
-      buyer_installation_fee: isSku ? "" : valueFrom(buyerPayment, "buyer_paid_packaging_fee"),
+      buyer_installation_fee: isFirstSku
+        ? valueFrom(buyerPayment, "buyer_paid_packaging_fee")
+        : "",
       buyer_username: valueFrom(order, "buyer_username"),
     },
   };
