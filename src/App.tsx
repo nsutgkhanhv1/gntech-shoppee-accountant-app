@@ -14,9 +14,10 @@ type Page = "orders" | "columns" | "excel";
 const STORAGE_KEYS = {
   shopeeConfig: "gntech.shopee.config",
   visibleColumns: "gntech.orders.visibleColumns",
-  visibleExcelOrderColumns: "gntech.excel.orderColumns",
   visibleExcelSkuColumns: "gntech.excel.skuColumns",
   dateMode: "gntech.orders.dateMode",
+  rangeFrom: "gntech.orders.rangeFrom",
+  rangeTo: "gntech.orders.rangeTo",
   theme: "gntech.theme",
 };
 
@@ -82,7 +83,9 @@ function loadString(key: string, fallback: string): string {
 }
 
 function parseDateMode(value: string): DateMode {
-  return value === "paid" || value === "completed" ? value : "created";
+  return value === "paid" || value === "completed" || value === "created"
+    ? value
+    : "paid";
 }
 
 function loadVisibleColumns() {
@@ -193,12 +196,16 @@ function App() {
   const [config, setConfig] = useState<ShopeeConfig>(() =>
     loadJson(STORAGE_KEYS.shopeeConfig, defaultConfig),
   );
-  const [range, setRange] = useState<DateRange>({
-    from: todayInputValue(-13),
-    to: todayInputValue(),
+  const [range, setRange] = useState<DateRange>(() => {
+    const savedFrom = loadString(STORAGE_KEYS.rangeFrom, "");
+    const savedTo = loadString(STORAGE_KEYS.rangeTo, "");
+    return {
+      from: savedFrom || todayInputValue(-13),
+      to: savedTo || todayInputValue(),
+    };
   });
   const [dateMode, setDateMode] = useState<DateMode>(() =>
-    parseDateMode(loadString(STORAGE_KEYS.dateMode, "created")),
+    parseDateMode(loadString(STORAGE_KEYS.dateMode, "paid")),
   );
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     const saved = loadString(STORAGE_KEYS.theme, "");
@@ -221,14 +228,6 @@ function App() {
   const [columns, setColumns] = useState<ColumnDef[]>(fallbackColumns);
   const [visibleColumns, setVisibleColumns] =
     useState<string[]>(loadVisibleColumns);
-  const [visibleExcelOrderColumns, setVisibleExcelOrderColumns] = useState<
-    string[]
-  >(() =>
-    ensureExcelColumns(
-      loadStringList(STORAGE_KEYS.visibleExcelOrderColumns, defaultExcelOrderColumns),
-      requiredOrderStatusExcelColumns,
-    ),
-  );
   const [visibleExcelSkuColumns, setVisibleExcelSkuColumns] = useState<
     string[]
   >(() =>
@@ -279,14 +278,6 @@ function App() {
     );
   }
 
-  function updateVisibleExcelOrderColumns(nextColumns: string[]) {
-    setVisibleExcelOrderColumns(nextColumns);
-    localStorage.setItem(
-      STORAGE_KEYS.visibleExcelOrderColumns,
-      JSON.stringify(nextColumns),
-    );
-  }
-
   function updateVisibleExcelSkuColumns(nextColumns: string[]) {
     setVisibleExcelSkuColumns(nextColumns);
     localStorage.setItem(
@@ -299,6 +290,16 @@ function App() {
     setDateMode(nextMode);
     try {
       localStorage.setItem(STORAGE_KEYS.dateMode, nextMode);
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  function updateRange(nextRange: DateRange) {
+    setRange(nextRange);
+    try {
+      localStorage.setItem(STORAGE_KEYS.rangeFrom, nextRange.from);
+      localStorage.setItem(STORAGE_KEYS.rangeTo, nextRange.to);
     } catch {
       // ignore storage errors
     }
@@ -356,7 +357,6 @@ function App() {
     setLoadPhase("exporting");
     try {
       exportRevenueWorkbook(rows, range, {
-        orderColumns: visibleExcelOrderColumns,
         skuColumns: visibleExcelSkuColumns,
       });
       // Sau khi xuất xong, nút Tải dữ liệu quay về primary.
@@ -454,7 +454,7 @@ function App() {
               onDateModeChange={updateDateMode}
               onExportOrders={exportOrders}
               onLoadOrders={loadOrders}
-              onRangeChange={setRange}
+              onRangeChange={updateRange}
               onSelectRow={setSelectedRow}
               range={range}
               rows={rows}
@@ -470,9 +470,7 @@ function App() {
             />
           ) : (
             <ExcelConfigPage
-              orderColumns={visibleExcelOrderColumns}
               skuColumns={visibleExcelSkuColumns}
-              onOrderColumnsChange={updateVisibleExcelOrderColumns}
               onSkuColumnsChange={updateVisibleExcelSkuColumns}
             />
           )}
@@ -875,25 +873,14 @@ function ColumnsPage({
 }
 
 function ExcelConfigPage({
-  orderColumns,
   skuColumns,
-  onOrderColumnsChange,
   onSkuColumnsChange,
 }: {
-  orderColumns: string[];
   skuColumns: string[];
-  onOrderColumnsChange: (columns: string[]) => void;
   onSkuColumnsChange: (columns: string[]) => void;
 }) {
   return (
     <div className="flex-1 space-y-5 overflow-auto p-4 sm:p-6">
-      <ExcelColumnPicker
-        title="Dòng Order"
-        description="Các cột xuất cho dòng tổng quan đơn hàng."
-        selectedColumns={orderColumns}
-        defaultColumns={defaultExcelOrderColumns}
-        onSelectedColumnsChange={onOrderColumnsChange}
-      />
       <ExcelColumnPicker
         title="Dòng Sku"
         description="Các cột xuất cho từng sản phẩm/phân loại trong đơn."
@@ -1484,6 +1471,7 @@ const excelColumns = [
   { key: "product_price", label: "Đơn giá gốc" },
   { key: "seller_product_subsidy", label: "Số tiền bạn trợ giá cho sản phẩm" },
   { key: "discounted_product_price", label: "Đơn giá sau giảm" },
+  { key: "delivery_revenue", label: "Doanh thu khi giao hàng" },
   { key: "refund_amount", label: "Số tiền hoàn lại" },
   { key: "seller_voucher", label: "Mã ưu đãi do Người Bán chịu" },
   { key: "seller_cofunded_voucher", label: "Mã ưu đãi Đồng Tài Trợ do Người Bán chịu" },
@@ -1525,18 +1513,85 @@ const excelColumns = [
   { key: "escrow_amount", label: "Tổng tiền đã thanh toán" },
   { key: "buyer_username", label: "Người Mua" },
 ];
+const columnDefinitions: Record<string, string> = {
+  transaction_id: "Số thứ tự dòng giao dịch (tự sinh theo thứ tự đơn).",
+  row_type: "Loại dòng (chi tiết từng phân loại SKU).",
+  order_sn: "Mã đơn hàng do Shopee cấp.",
+  order_status: "Mã trạng thái đơn (vd. COMPLETED, CANCELLED, TO_RETURN).",
+  order_status_label: "Trạng thái đơn bằng tiếng Việt.",
+  order_type: "Loại đơn (mặc định: Đơn thường).",
+  return_request_sn: "Mã yêu cầu hoàn tiền (nếu có).",
+  return_sn: "Mã yêu cầu hoàn/trả hàng (nếu có).",
+  return_status: "Trạng thái hoàn/trả: trống = không có yêu cầu; 'Không được hoàn' = có yêu cầu nhưng bị CANCELLED; 'Hoàn toàn bộ'/'Hoàn 1 phần' = return ACCEPTED, so |tiền hoàn| vs giá trước-hoàn.",
+  return_reason: "Lý do hoàn/trả hàng.",
+  item_id: "Mã sản phẩm (item).",
+  item_name: "Tên sản phẩm.",
+  model_name: "Tên phân loại (model).",
+  item_sku: "SKU sản phẩm.",
+  model_sku: "SKU phân loại (model).",
+  quantity: "Số lượng mua của SKU (model_quantity_purchased).",
+  returned_quantity: "Số lượng được chấp nhận hoàn/trả của SKU (chỉ tính return ACCEPTED).",
+  is_bestseller: "Sản phẩm bán chạy (YES/NO).",
+  create_time: "Ngày đặt hàng.",
+  update_time: "Ngày cập nhật trạng thái đơn.",
+  completion_time: "Ngày nhận/hoàn thành (khi COMPLETED).",
+  pay_time: "Ngày Shopee thanh toán cho shop (actual_payout_time).",
+  pickup_done_time: "Ngày lấy hàng.",
+  ship_by_date: "Hạn giao vận.",
+  payment_method: "Phương thức thanh toán.",
+  buyer_payment_method: "Phương thức thanh toán của người mua.",
+  buyer_payment_method_details: "Chi tiết phương thức thanh toán của người mua.",
+  instalment_plan: "Khoản trả góp (nếu có).",
+  shipping_carrier: "Đơn vị vận chuyển.",
+  courier_name: "Tên courier (gói hàng đầu tiên).",
+  tax_registration_code: "Mã số thuế của shop.",
+
+  product_price: "Đơn giá gốc (trước giảm) = model_original_price.",
+  seller_product_subsidy: "Số tiền shop trợ giá cho sản phẩm (giảm trực tiếp, không qua voucher) = seller_discount.",
+  discounted_product_price: "Đơn giá sau giảm = Đơn giá gốc − Trợ giá shop. SKU đã hoàn = phần còn lại (0 nếu hoàn toàn bộ).",
+  delivery_revenue: "Doanh thu khi giao hàng = selling_price (giá sản phẩm lúc giao, trước hoàn trả) = Đơn giá sau giảm + Tiền hoàn SKU.",
+  refund_amount: "Số tiền hoàn lại = |seller_return_refund| prorate theo selling_price (toàn bộ tiền shop trả lại Shopee, gồm cả phần voucher Shopee).",
+  seller_voucher: "Mã ưu đãi do Người bán chịu (voucher shop phát hành).",
+  seller_cofunded_voucher: "Mã ưu đãi Đồng tài trợ do Người bán chịu.",
+  seller_coin_cash_back: "Mã hoàn xu do Người bán chịu (không có ở mức SKU, để trống).",
+  seller_cofunded_coin_cash_back: "Mã hoàn xu Đồng tài trợ do Người bán chịu (không có ở mức SKU, để trống).",
+  voucher_code: "Mã voucher đã dùng.",
+  coins: "Shopee xu (xu giảm giá người mua dùng) = discount_from_coin.",
+  shopee_voucher: "Voucher do Shopee tài trợ (KHÔNG thuộc doanh thu sản phẩm shop). SKU = discount_from_voucher_shopee.",
+  bank_credit_card_promotion: "Khuyến mãi thanh toán thẻ tín dụng do Ngân hàng.",
+  shopee_credit_card_promotion: "Khuyến mãi thanh toán thẻ tín dụng do Shopee.",
+  shopee_product_subsidy: "Sản phẩm được trợ giá từ Shopee (shopee_discount).",
+  trade_in_bonus_by_seller: "Trade-in Bonus do shop chịu.",
+
+  buyer_total_amount: "Tổng tiền người mua trả.",
+  item_refund_amount: "Tiền hoàn của SKU = |seller_return_refund| prorate theo selling_price (toàn bộ tiền shop trả lại Shopee).",
+  return_item_price: "Tiền hàng hoàn của SKU (= Tiền hoàn của SKU).",
+
+  vat_tax: "Thuế GTGT (withholding_vat_tax / final_product_vat_tax).",
+  pit_tax: "Thuế TNCN (withholding_pit_tax).",
+
+  commission_fee: "Phí cố định (commission_fee / net_commission_fee).",
+  service_fee: "Phí dịch vụ (service_fee / net_service_fee).",
+  seller_transaction_fee: "Phí xử lý giao dịch.",
+  transaction_fee_rate: "Tỷ lệ phí giao dịch (%).",
+  affiliate_commission_fee: "Phí hoa hồng Tiếp thị liên kết (AMS).",
+  piship_service_fee: "Phí dịch vụ PiShip (fbs_fee).",
+  display_service_fee: "Phí dịch vụ hiển thị NTTD (từ doanh thu đơn).",
+  buyer_paid_shipping_fee: "Phí vận chuyển người mua trả.",
+  actual_shipping_fee: "Phí vận chuyển thực tế.",
+  shopee_shipping_rebate: "Phí vận chuyển được trợ giá từ Shopee.",
+  shipping_fee_discount_from_3pl: "Phí vận chuyển giảm từ 3PL.",
+  seller_shipping_discount: "Phí vận chuyển người bán hỗ trợ.",
+  reverse_shipping_fee: "Phí vận chuyển trả hàng (đơn trả/hoàn) = final_return_to_seller_shipping_fee.",
+  piship_shipping_refund: "Phí vận chuyển được hoàn bởi PiShip = reverse_shipping_fee.",
+  failed_delivery_return_shipping_fee: "Phí vận chuyển trả hàng (đơn giao không thành công) = reverse_shipping_fee_sst.",
+  buyer_installation_fee: "Phí lắp đặt người mua trả.",
+
+  lost_compensation: "Đền bù đơn mất hàng (seller_lost_compensation).",
+  escrow_amount: "Tổng tiền Shopee đã thanh toán cho shop (sau mọi phí/thuế).",
+  buyer_username: "Tên người mua.",
+};
 const excelColumnKeys = excelColumns.map((column) => column.key);
-const defaultExcelOrderColumns = excelColumnKeys.filter(
-  (key) =>
-    ![
-      "item_id",
-      "item_name",
-      "model_name",
-      "item_sku",
-      "model_sku",
-      "quantity",
-    ].includes(key),
-);
 const defaultExcelSkuColumns = excelColumnKeys;
 const requiredOrderStatusExcelColumns = [
   "order_status",
@@ -1561,31 +1616,27 @@ function ensureExcelColumns(columns: string[], requiredColumns: string[]) {
   return excelColumnKeys.filter((key) => selected.has(key));
 }
 
-function mergeColumnKeys(orderColumns: string[], skuColumns: string[]) {
-  return excelColumnKeys.filter(
-    (key) => orderColumns.includes(key) || skuColumns.includes(key),
-  );
-}
-
 function exportRevenueWorkbook(
   rows: OrderRow[],
   range: DateRange,
-  config: { orderColumns: string[]; skuColumns: string[] },
+  config: { skuColumns: string[] },
 ) {
   const exportRows = buildRevenueExportRows(rows);
-  const selectedKeys = mergeColumnKeys(config.orderColumns, config.skuColumns);
-  const selectedColumns = excelColumns.filter((column) => selectedKeys.includes(column.key));
-  const dataRows = exportRows.map((row) => {
-    const allowedKeys = row.rowType === "Sku" ? config.skuColumns : config.orderColumns;
-    return selectedColumns.map((column) =>
-      allowedKeys.includes(column.key) ? row.values[column.key] : "",
-    );
-  });
+  const selectedColumns = excelColumns.filter((column) =>
+    config.skuColumns.includes(column.key),
+  );
+  const dataRows = exportRows.map((row) =>
+    selectedColumns.map((column) => row.values[column.key] ?? ""),
+  );
   const workbookRows: ExportCell[][] = [
+    selectedColumns.map((column) => columnDefinitions[column.key] ?? ""),
     selectedColumns.map((column) => column.label),
     ...dataRows,
   ];
-  const workbook = createXlsxWorkbook("Doanh thu", workbookRows);
+  const workbook = createXlsxWorkbook("Doanh thu", workbookRows, {
+    definitionRows: 1,
+    headerRows: 1,
+  });
   const blob = new Blob([workbook], {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   });
@@ -1624,20 +1675,6 @@ function buildRevenueExportRows(rows: OrderRow[]) {
     const orderRefundTotal = Math.abs(asNumber(valueFrom(income, "seller_return_refund")) ?? 0);
     const skuRefunds = computeSkuRefunds(itemRows, incomeItems, returnDetails, orderRefundTotal);
 
-    output.push(
-      revenueRow({
-        index: transactionIndex++,
-        rowType: "Order",
-        order,
-        income,
-        incomeDetail,
-        buyerPayment,
-        returnDetails,
-        firstPackage,
-        orderSn,
-      }),
-    );
-
     itemRows.forEach((item, itemIndex) => {
       const incomeItem = findIncomeItem(incomeItems, item);
       output.push(
@@ -1662,11 +1699,12 @@ function buildRevenueExportRows(rows: OrderRow[]) {
   return output;
 }
 
-// Tính tiền hoàn thực tế của từng SKU:
-// - Ưu tiên lấy trực tiếp `item.refund_amount` từ return detail (chính xác cho shop
-//   được whitelist Partial Qty RR, đúng cả khi hoàn 1 trong nhiều SKU).
-// - Nếu không có (shop chưa whitelist), prorate |seller_return_refund| (order-level)
-//   cho các SKU có return được chấp nhận, theo selling_price.
+// Tính tiền hoàn của SKU = phân bổ |seller_return_refund| (order-level) cho các SKU có
+// return được chấp nhận, prorate theo selling_price.
+// Đây là TOÀN BỘ tiền shop trả lại Shopee (gồm cả phần voucher Shopee thu lại), khớp
+// với cột "Số tiền hoàn lại" (dòng SKU) trong file Income Shopee.
+// Lưu ý: KHÔNG dùng `item.refund_amount` từ return detail vì đó là tiền buyer được hoàn
+// (= selling_price − voucher), không phải tiền shop trả lại Shopee.
 // SKU không có return được chấp nhận → refund = 0.
 function computeSkuRefunds(
   itemRows: Record<string, unknown>[],
@@ -1686,27 +1724,20 @@ function computeSkuRefunds(
         .includes("ACCEPTED"),
     );
     const hasAccepted = acceptedItems.length > 0;
-    // item.refund_amount từ return detail: tiền hoàn chính xác của SKU
-    // (chỉ shop whitelist Partial Qty RR). Ưu tiên nếu > 0.
-    const directRefund = acceptedItems.reduce((sum, entry) => {
-      const value = asNumber(entry.item.refund_amount) ?? 0;
-      return sum + Math.abs(value);
-    }, 0);
     const sellingPrice =
       asNumber(valueFrom(source, "selling_price", "discounted_price")) ??
       asNumber(item.model_discounted_price) ??
       0;
-    return { hasAccepted, directRefund, sellingPrice };
+    return { hasAccepted, sellingPrice };
   });
-  const totalAcceptedSelling = infos
-    .filter((info) => info.hasAccepted)
-    .reduce((sum, info) => sum + (info.sellingPrice || 0), 0);
+  const acceptedInfos = infos.filter((info) => info.hasAccepted);
+  const totalAcceptedSelling = acceptedInfos.reduce(
+    (sum, info) => sum + (info.sellingPrice || 0),
+    0,
+  );
 
   return infos.map((info) => {
     if (!info.hasAccepted) return 0;
-    // Ưu tiên refund trực tiếp từng SKU nếu có (Partial Qty RR).
-    if (info.directRefund > 0) return info.directRefund;
-    // Fallback: prorate tổng refund theo selling_price.
     if (totalAcceptedSelling <= 0) return 0;
     return totalRefund * (info.sellingPrice / totalAcceptedSelling);
   });
@@ -1778,6 +1809,31 @@ function revenueRow({
   const orderOnly = (...keys: string[]) => (isSku ? "" : valueFrom(income, ...keys));
   const skuOnly = (...keys: string[]) => (isSku ? valueFrom(source, ...keys) : valueFrom(income, ...keys));
 
+  // "Doanh thu khi giao hàng" = selling_price (giá sản phẩm lúc giao, trước hoàn trả).
+  // = Đơn giá sau giảm + Tiền hoàn SKU (phần đã bị trừ hoàn + phần còn lại = giá gốc).
+  // Không hoàn: Tiền hoàn = 0 → = Đơn giá sau giảm (= selling_price).
+  // Có hoàn: Đơn giá sau giảm (phần còn lại sau hoàn) + Tiền hoàn (toàn bộ |srr|) = selling_price.
+  const deliveryRevenue = (asNumber(discountedProductPrice) ?? 0) + skuRefundAmount;
+
+  // Trạng thái hoàn/trả (tiếng Việt):
+  // - Không có yêu cầu hoàn/trả (không có return_sn): để trống.
+  // - Có yêu cầu nhưng không có return ACCEPTED (CANCELLED/REQUESTED/...):
+  //   "Không được hoàn".
+  // - Có return ACCEPTED: so |seller_return_refund| với giá trước hoàn của đơn
+  //   (order-level, nhất quán cho cả dòng Order và SKU):
+  //   >= -> "Hoàn toàn bộ"; < -> "Hoàn 1 phần".
+  const hasReturnRequest = Boolean(returnSummary.returnSn);
+  const hasAcceptedReturn = isSku
+    ? skuHasReturn
+    : returnDetails.some((detail) =>
+        String(asString(detail.status) ?? "").toUpperCase().includes("ACCEPTED"),
+      );
+  const returnStatusVi = !hasReturnRequest
+    ? ""
+    : !hasAcceptedReturn
+      ? "Không được hoàn"
+      : refundStatusVietnamese(orderRefundAbs, orderDiscPreRefund);
+
   return {
     rowType,
     values: {
@@ -1814,18 +1870,19 @@ function revenueRow({
       buyer_total_amount: orderOnly("buyer_total_amount", "buyer_total_amount_pri"),
       refund_amount: isSku ? (skuRefundAmount || "") : orderOnly("seller_return_refund"),
       return_sn: returnSummary.returnSn,
-      return_status: returnSummary.status,
+      return_status: returnStatusVi,
       return_reason: returnSummary.reason,
       returned_quantity: returnSummary.quantity,
       // SKU: tiền hoàn của SKU = refund thực tế (prorated từ seller_return_refund).
       // Order: để trống (sẽ dùng cột "Số tiền hoàn lại" order-level).
       item_refund_amount: isSku ? (skuRefundAmount || "") : returnSummary.refundAmount,
       return_item_price: isSku ? (skuRefundAmount || "") : returnSummary.itemPrice,
+      delivery_revenue: Math.round(deliveryRevenue),
       lost_compensation: orderOnly("seller_lost_compensation"),
       trade_in_bonus_by_seller: orderOnly("trade_in_bonus_by_seller"),
       seller_voucher: skuOnly("discount_from_voucher_seller", "voucher_from_seller"),
       seller_cofunded_voucher: "",
-      seller_coin_cash_back: skuOnly("discount_from_coin", "seller_coin_cash_back"),
+      seller_coin_cash_back: "",
       seller_cofunded_coin_cash_back: "",
       voucher_code: isSku ? "" : voucherCodes(income),
       coins: skuOnly("discount_from_coin", "coins"),
@@ -1901,6 +1958,12 @@ function findReturnItemsForItem(
       })
       .map((returnItem) => ({ detail, item: returnItem })),
   );
+}
+
+function refundStatusVietnamese(refund: number, fullPrice: number): string {
+  if (refund <= 0) return "Không được hoàn";
+  if (fullPrice > 0 && refund >= fullPrice - 1) return "Hoàn toàn bộ";
+  return "Hoàn 1 phần";
 }
 
 function summarizeReturnItems(
@@ -1994,9 +2057,13 @@ function excelDate(value: unknown) {
   }).format(new Date(value * 1000));
 }
 
-function createXlsxWorkbook(sheetName: string, rows: ExportCell[][]) {
+function createXlsxWorkbook(
+  sheetName: string,
+  rows: ExportCell[][],
+  options?: { definitionRows?: number; headerRows?: number },
+) {
   const files = new Map<string, Uint8Array>();
-  const sheetXml = buildWorksheetXml(rows);
+  const sheetXml = buildWorksheetXml(rows, options);
 
   files.set("[Content_Types].xml", encodeXml(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -2025,11 +2092,11 @@ function createXlsxWorkbook(sheetName: string, rows: ExportCell[][]) {
 </workbook>`));
   files.set("xl/styles.xml", encodeXml(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts>
-  <fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFEE4D2D"/><bgColor indexed="64"/></patternFill></fill></fills>
+  <fonts count="3"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font><font><i/><sz val="10"/><color rgb="FF595959"/><name val="Calibri"/></font></fonts>
+  <fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFEE4D2D"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF2F2F2"/><bgColor indexed="64"/></patternFill></fill></fills>
   <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
   <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFill="1" applyFont="1"/></cellXfs>
+  <cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFill="1" applyFont="1"/><xf numFmtId="0" fontId="2" fillId="3" borderId="0" xfId="0" applyFill="1" applyFont="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf></cellXfs>
   <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>`));
   files.set("xl/worksheets/sheet1.xml", encodeXml(sheetXml));
@@ -2048,33 +2115,68 @@ function createXlsxWorkbook(sheetName: string, rows: ExportCell[][]) {
   return buildZip(files);
 }
 
-function buildWorksheetXml(rows: ExportCell[][]) {
+function buildWorksheetXml(
+  rows: ExportCell[][],
+  options?: { definitionRows?: number; headerRows?: number },
+) {
+  const definitionRows = options?.definitionRows ?? 0;
+  const headerRows = options?.headerRows ?? 1;
+  const frozenRows = definitionRows + headerRows;
   const colCount = Math.max(...rows.map((row) => row.length), 1);
-  const colXml = Array.from({ length: colCount }, (_, index) => {
-    const width = index === 6 ? 48 : index === 7 ? 22 : index >= 16 ? 18 : 16;
-    return `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`;
-  }).join("");
+  const colWidth = (index: number) => (index === 6 ? 48 : index === 7 ? 22 : index >= 16 ? 18 : 16);
+  const colXml = Array.from({ length: colCount }, (_, index) =>
+    `<col min="${index + 1}" max="${index + 1}" width="${colWidth(index)}" customWidth="1"/>`,
+  ).join("");
   const rowXml = rows
     .map((row, rowIndex) => {
+      const isDefinition = rowIndex < definitionRows;
+      const isHeader = !isDefinition && rowIndex < frozenRows;
+      const kind: CellKind = isDefinition ? "definition" : isHeader ? "header" : "data";
       const cells = row
-        .map((cell, colIndex) => worksheetCellXml(rowIndex + 1, colIndex + 1, cell, rowIndex === 0))
+        .map((cell, colIndex) => worksheetCellXml(rowIndex + 1, colIndex + 1, cell, kind))
         .join("");
-      return `<row r="${rowIndex + 1}">${cells}</row>`;
+      // Ước lượng chiều cao dòng định nghĩa theo text dài nhất / số ký tự mỗi dòng.
+      let rowAttrs = "";
+      if (isDefinition) {
+        const maxLen = row.reduce<number>(
+          (m, cell) => Math.max(m, String(cell ?? "").length),
+          0,
+        );
+        const lines = Math.max(1, Math.ceil(maxLen / 16));
+        const height = Math.min(409, Math.max(30, lines * 15 + 4));
+        rowAttrs = ` ht="${height}" customHeight="1"`;
+      }
+      return `<row r="${rowIndex + 1}"${rowAttrs}>${cells}</row>`;
     })
     .join("");
 
+  // AutoFilter đặt ở dòng HEADER (dòng đầu chứa tên cột). Nếu có dòng định nghĩa
+  // ở trên thì header là dòng (definitionRows + 1), ngược lại là dòng 1.
+  const headerRowNumber = definitionRows + 1;
+  const filterStart = headerRowNumber;
+  // Freeze tất cả các dòng trên header (định nghĩa + header) để filter và định nghĩa
+  // luôn hiển thị khi cuộn.
+  const topLeft = `A${headerRowNumber + 1}`;
+  const pane = `<pane ySplit="${headerRowNumber}" topLeftCell="${topLeft}" activePane="bottomLeft" state="frozen"/>`;
+
 return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+  <sheetViews><sheetView workbookViewId="0">${pane}</sheetView></sheetViews>
   <cols>${colXml}</cols>
   <sheetData>${rowXml}</sheetData>
-  <autoFilter ref="A1:${columnName(colCount)}${Math.max(rows.length, 1)}"/>
+  <autoFilter ref="A${filterStart}:${columnName(colCount)}${Math.max(rows.length, 1)}"/>
 </worksheet>`;
 }
 
-function worksheetCellXml(row: number, column: number, value: ExportCell, isHeader: boolean) {
+type CellKind = "data" | "header" | "definition";
+function worksheetCellXml(
+  row: number,
+  column: number,
+  value: ExportCell,
+  kind: CellKind,
+) {
   const ref = `${columnName(column)}${row}`;
-  const style = isHeader ? ' s="1"' : "";
+  const style = kind === "header" ? ' s="1"' : kind === "definition" ? ' s="2"' : "";
   if (typeof value === "number" && Number.isFinite(value)) {
     return `<c r="${ref}"${style}><v>${value}</v></c>`;
   }
