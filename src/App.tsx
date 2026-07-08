@@ -1477,7 +1477,7 @@ const excelColumns = [
   { key: "voucher_code", label: "Mã voucher" },
   { key: "delivery_revenue", label: "Doanh thu khi giao hàng" },
   { key: "refund_amount", label: "Số tiền hoàn lại" },
-  { key: "discounted_product_price", label: "Đơn giá sau giảm" },
+  { key: "discounted_product_price", label: "Doanh thu sau giảm và hoàn hủy" },
   { key: "coins", label: "Shopee xu" },
   { key: "shopee_voucher", label: "Shopee voucher" },
   { key: "bank_credit_card_promotion", label: "Ngân hàng khuyến mãi thanh toán trên Thẻ Tín Dụng" },
@@ -1548,8 +1548,8 @@ const columnDefinitions: Record<string, string> = {
 
   product_price: "Đơn giá gốc (trước giảm) = model_original_price.",
   seller_product_subsidy: "Số tiền shop trợ giá cho sản phẩm (giảm trực tiếp, không qua voucher) = seller_discount.",
-  discounted_product_price: "Đơn giá sau giảm = Đơn giá gốc − Trợ giá shop. SKU đã hoàn = phần còn lại (0 nếu hoàn toàn bộ).",
-  delivery_revenue: "Doanh thu khi giao hàng = Đơn giá sau giảm + Tiền hoàn SKU − (Mã ưu đãi do NB chịu + Mã ưu đãi Đồng tài trợ do NB chịu + Mã hoàn xu do NB chịu + Mã hoàn xu Đồng tài trợ do NB chịu).",
+  discounted_product_price: "Doanh thu sau giảm và hoàn hủy = Đơn giá gốc − Trợ giá shop. SKU đã hoàn = phần còn lại (0 nếu hoàn toàn bộ).",
+  delivery_revenue: "Doanh thu khi giao hàng = Doanh thu sau giảm và hoàn hủy + Tiền hoàn SKU − (Mã ưu đãi do NB chịu + Mã ưu đãi Đồng tài trợ do NB chịu + Mã hoàn xu do NB chịu + Mã hoàn xu Đồng tài trợ do NB chịu).",
   refund_amount: "Số tiền hoàn lại = |seller_return_refund| prorate theo selling_price (toàn bộ tiền shop trả lại Shopee, gồm cả phần voucher Shopee).",
   seller_voucher: "Mã ưu đãi do Người bán chịu (voucher shop phát hành).",
   seller_cofunded_voucher: "Mã ưu đãi Đồng tài trợ do Người bán chịu.",
@@ -2145,10 +2145,10 @@ function createXlsxWorkbook(
   files.set("xl/styles.xml", encodeXml(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <fonts count="3"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font><font><i/><sz val="10"/><color rgb="FF595959"/><name val="Calibri"/></font></fonts>
-  <fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFEE4D2D"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF2F2F2"/><bgColor indexed="64"/></patternFill></fill></fills>
+  <fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFEE4D2D"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF2F2F2"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF9C27B0"/><bgColor indexed="64"/></patternFill></fill></fills>
   <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
   <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFill="1" applyFont="1"/><xf numFmtId="0" fontId="2" fillId="3" borderId="0" xfId="0" applyFill="1" applyFont="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf></cellXfs>
+  <cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFill="1" applyFont="1"/><xf numFmtId="0" fontId="2" fillId="3" borderId="0" xfId="0" applyFill="1" applyFont="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf numFmtId="0" fontId="1" fillId="4" borderId="0" xfId="0" applyFill="1" applyFont="1"/></cellXfs>
   <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>`));
   files.set("xl/worksheets/sheet1.xml", encodeXml(sheetXml));
@@ -2220,6 +2220,12 @@ return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </worksheet>`;
 }
 
+// Các cột header nổi bật màu tím (label khớp).
+const purpleHeaderLabels = new Set([
+  "Doanh thu khi giao hàng",
+  "Số tiền hoàn lại",
+]);
+
 type CellKind = "data" | "header" | "definition";
 function worksheetCellXml(
   row: number,
@@ -2228,7 +2234,14 @@ function worksheetCellXml(
   kind: CellKind,
 ) {
   const ref = `${columnName(column)}${row}`;
-  const style = kind === "header" ? ' s="1"' : kind === "definition" ? ' s="2"' : "";
+  const style =
+    kind === "header"
+      ? purpleHeaderLabels.has(String(value ?? ""))
+        ? ' s="3"'
+        : ' s="1"'
+      : kind === "definition"
+        ? ' s="2"'
+        : "";
   if (typeof value === "number" && Number.isFinite(value)) {
     return `<c r="${ref}"${style}><v>${value}</v></c>`;
   }
