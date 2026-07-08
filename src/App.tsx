@@ -1549,7 +1549,7 @@ const columnDefinitions: Record<string, string> = {
   product_price: "Đơn giá gốc (trước giảm) = model_original_price.",
   seller_product_subsidy: "Số tiền shop trợ giá cho sản phẩm (giảm trực tiếp, không qua voucher) = seller_discount.",
   discounted_product_price: "Đơn giá sau giảm = Đơn giá gốc − Trợ giá shop. SKU đã hoàn = phần còn lại (0 nếu hoàn toàn bộ).",
-  delivery_revenue: "Doanh thu khi giao hàng = selling_price (giá sản phẩm lúc giao, trước hoàn trả) = Đơn giá sau giảm + Tiền hoàn SKU.",
+  delivery_revenue: "Doanh thu khi giao hàng = Đơn giá sau giảm + Tiền hoàn SKU − (Mã ưu đãi do NB chịu + Mã ưu đãi Đồng tài trợ do NB chịu + Mã hoàn xu do NB chịu + Mã hoàn xu Đồng tài trợ do NB chịu).",
   refund_amount: "Số tiền hoàn lại = |seller_return_refund| prorate theo selling_price (toàn bộ tiền shop trả lại Shopee, gồm cả phần voucher Shopee).",
   seller_voucher: "Mã ưu đãi do Người bán chịu (voucher shop phát hành).",
   seller_cofunded_voucher: "Mã ưu đãi Đồng tài trợ do Người bán chịu.",
@@ -1809,11 +1809,18 @@ function revenueRow({
   const orderOnly = (...keys: string[]) => (isSku ? "" : valueFrom(income, ...keys));
   const skuOnly = (...keys: string[]) => (isSku ? valueFrom(source, ...keys) : valueFrom(income, ...keys));
 
-  // "Doanh thu khi giao hàng" = selling_price (giá sản phẩm lúc giao, trước hoàn trả).
-  // = Đơn giá sau giảm + Tiền hoàn SKU (phần đã bị trừ hoàn + phần còn lại = giá gốc).
-  // Không hoàn: Tiền hoàn = 0 → = Đơn giá sau giảm (= selling_price).
-  // Có hoàn: Đơn giá sau giảm (phần còn lại sau hoàn) + Tiền hoàn (toàn bộ |srr|) = selling_price.
-  const deliveryRevenue = (asNumber(discountedProductPrice) ?? 0) + skuRefundAmount;
+  // "Doanh thu khi giao hàng" = selling_price − các khoản giảm do Người bán chịu.
+  // selling_price = Đơn giá sau giảm + Tiền hoàn SKU (phần còn lại + phần hoàn = giá gốc).
+  // Trừ thêm: Mã ưu đãi do NB chịu, Mã ưu đãi Đồng tài trợ do NB chịu,
+  // Mã hoàn xu do NB chịu, Mã hoàn xu Đồng tài trợ do NB chịu
+  // (các khoản shop tự bỏ tiền, không phải Shopee tài trợ).
+  const sellerBorneDiscount =
+    (asNumber(skuOnly("discount_from_voucher_seller", "voucher_from_seller")) ?? 0) +
+    0 + // seller_cofunded_voucher: không có field mức SKU
+    0 + // seller_coin_cash_back: không có field mức SKU
+    0;  // seller_cofunded_coin_cash_back: không có field mức SKU
+  const deliveryRevenue =
+    (asNumber(discountedProductPrice) ?? 0) + skuRefundAmount - sellerBorneDiscount;
 
   // Trạng thái hoàn/trả (tiếng Việt):
   // - Không có yêu cầu hoàn/trả (không có return_sn): để trống.
